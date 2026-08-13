@@ -1,0 +1,10 @@
+dataset:
+  - MovieLens-1M
+  - Amazon All Beauty
+  - Amazon Magazine Subscriptions
+model:
+  - SASRec
+  - LIghtGCN
+  - Multi-VAE
+track: 100
+agent_num: 100

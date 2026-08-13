@@ -1,0 +1,12 @@
+websim_url: "http://127.0.0.1:19001/"
+
+dataset: "ml1m"
+model: "poprec"
+
+track: 5
+
+headless: true
+slow_mo_ms: 0
+
+human_delay_min_ms: 1000
+human_delay_max_ms: 2500
