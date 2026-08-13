@@ -59,7 +59,7 @@ class AgentAction:
 
 
 class WebSimEnvironment:
-    """不使用Playwright的WebSim批量仿真环境。"""
+    """直接在内存中运行的 WebSim 批量仿真环境。"""
 
     def __init__(
         self,

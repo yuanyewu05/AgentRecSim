@@ -13,12 +13,12 @@ WebSim 是一个面向推荐系统实验的本地仿真平台。项目将推荐�
 - 记录当前会话中的曝光、点击和热度变化。
 - 支持发表评论、查看历史评论和为评论点赞。
 - 提供完整的模型训练脚本和 Amazon 数据集批量训练脚本。
-- 支持 Playwright 浏览器 Agent 和无浏览器的大规模异步 LLM Agent 仿真。
+- 支持无需浏览器和 Flask 服务的大规模异步 LLM Agent 仿真。
 
 ## 系统结构
 
 ```text
-浏览器 / Agent
+浏览器
       │
       ▼
 Flask Web 服务（app.py）
@@ -39,7 +39,6 @@ Flask Web 服务（app.py）
 - NumPy / pandas
 - 原生 HTML、CSS 和 JavaScript
 - CAMEL-AI / OpenAI 兼容接口
-- Playwright
 
 ## 快速开始
 
@@ -65,12 +64,6 @@ macOS / Linux：
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-如果需要运行浏览器 Agent，还需安装 Playwright 浏览器：
-
-```bash
-python -m playwright install chromium
 ```
 
 ### 2. 准备数据集
@@ -216,38 +209,26 @@ python generate_profiles.py --count 100 --seed 42 --output profiles.jsonl
 
 每行是一名虚拟用户的 JSON 画像，包含人口属性、内容偏好、交互倾向和独立随机种子。
 
-### 浏览器 Agent
-
-浏览器 Agent 通过 Playwright 操作正在运行的 WebSim 页面。先编辑 `agent_task.yaml`：
-
-```yaml
-websim_url: "http://127.0.0.1:19001/"
-dataset: "ml1m"
-model: "poprec"
-track: 5
-headless: true
-slow_mo_ms: 0
-human_delay_min_ms: 1000
-human_delay_max_ms: 2500
-```
-
-运行单个 Agent：
-
-```bash
-python websim_user_agent.py --profile-index 0 --profiles profiles.jsonl
-```
-
-并发运行多个浏览器 Agent：
-
-```bash
-python batch_runner.py --start-index 0 --count 10 --concurrency 2 --profiles profiles.jsonl
-```
-
-运行日志与截图会写入 `agent_runs/` 和 `batch_logs/`，这些运行产物不会提交到 Git。
-
-### 无浏览器大规模仿真
+### 无浏览器并行仿真
 
 `large_scale/large_scale_runner.py` 直接调用 WebSim 的 Python 环境与 LLM 策略，不启动浏览器，适合批量实验：
+
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\python.exe -m large_scale.large_scale_runner `
+  --start-index 0 `
+  --count 4 `
+  --profiles .\profiles.jsonl `
+  --track 2 `
+  --batch-size 4 `
+  --max-concurrency 2 `
+  --max-retries 3 `
+  --request-timeout 120 `
+  --result-dir .\large_scale_runs
+```
+
+macOS / Linux：
 
 ```bash
 python -m large_scale.large_scale_runner \
@@ -259,6 +240,12 @@ python -m large_scale.large_scale_runner \
   --batch-size 20 \
   --max-concurrency 4
 ```
+
+并行参数含义：
+
+- `--count`：本次运行的 Agent 总数。
+- `--batch-size`：每批提交到异步队列的 Agent 数量。
+- `--max-concurrency`：同时进行的真实 LLM API 请求上限，也是实际 API 并发控制参数。
 
 可选的画像选择方式：
 
@@ -354,8 +341,6 @@ D8EAX/
 ├── static/                        # 前端脚本与样式
 ├── artifacts/                     # 权重、评论和训练结果
 ├── generate_profiles.py           # 虚拟用户画像生成
-├── websim_user_agent.py           # 单个 Playwright Agent
-├── batch_runner.py                # 浏览器 Agent 并发调度
 ├── large_scale/                   # 无浏览器的大规模仿真
 ├── scripts/                       # 服务管理与批量训练脚本
 └── docs/                          # UML 和软件工程图
@@ -378,14 +363,6 @@ D8EAX/
 ### Agent 提示缺少环境变量
 
 确认项目根目录存在 `.env`，且包含 `YUNWU_API_KEY`、`YUNWU_BASE_URL` 和 `YUNWU_MODEL`。接口必须兼容 OpenAI 风格的聊天补全调用。
-
-### Playwright 找不到浏览器
-
-执行：
-
-```bash
-python -m playwright install chromium
-```
 
 ## 开发检查
 

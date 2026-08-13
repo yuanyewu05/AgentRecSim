@@ -12,6 +12,7 @@ __pycache__/
 *.log
 *.pid
 web.log
+# Legacy browser-Agent outputs kept locally for reference
 agent_runs/
 batch_logs/
 large_scale_runs/
