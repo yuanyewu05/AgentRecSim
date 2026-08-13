@@ -1,273 +1,410 @@
-# WebSim 推荐系统交互仿真平台
+# WebSim：多数据集、多模型推荐系统交互仿真平台
 
-![What is WebSim](Method.png "WebSim Platform")
+WebSim 是一个面向推荐系统实验的本地仿真平台。项目将推荐模型、可交互网页、虚拟用户 Agent 和批量实验工具整合在一起，可用于观察用户点击行为、对比不同推荐算法，以及开展基于大语言模型的用户行为仿真。
 
-`WebSim` 是一个基于 Flask 的本地推荐系统仿真平台，提供两种交互页面：
+![WebSim 方法概览](Method.png)
 
-- 网格页（`/`）：M x N卡片展示，支持点击与翻页, 主要模拟的Browser Web端
-- 滑动页（`/swipe`）：上下滑（含键盘上下键）浏览推荐， 主要模拟的移动端短视频浏览场景。
+## 主要功能
 
-当前服务支持 3 个数据集和 7 个推荐模型，并可按会话记录曝光/点击统计，实时展示评分与热度。
+- 支持 MovieLens-1M、Amazon All Beauty 和 Amazon Magazine Subscriptions 三类数据集。
+- 支持 SASRec、LightGCN、Mult-VAE、PopRec、BPR-MF、GRU4Rec 和 BERT4Rec 七种推荐模型。
+- 提供两种交互界面：四卡片网格页和单卡片滑动页。
+- 根据用户点击历史实时刷新推荐结果，每页返回 4 个条目。
+- 记录当前会话中的曝光、点击和热度变化。
+- 支持发表评论、查看历史评论和为评论点赞。
+- 提供完整的模型训练脚本和 Amazon 数据集批量训练脚本。
+- 支持 Playwright 浏览器 Agent 和无浏览器的大规模异步 LLM Agent 仿真。
 
-## 更新概要
+## 系统结构
 
-- 2026.04.24 --- 更新每个item下面的评论栏，每条评论可点赞。
+```text
+浏览器 / Agent
+      │
+      ▼
+Flask Web 服务（app.py）
+      │
+      ├── 数据集与条目元数据（MovieCatalog）
+      ├── 推荐模型统一入口（MovieRecommender）
+      ├── 评论、点赞与会话统计
+      └── 海报文件或缺省 SVG 海报
+```
 
-## 当前数据集和模型
+推荐模型权重仅在对应文件存在时加载。若当前数据集没有可用模型，系统仍可展示随机条目；若模型无法生成有效结果，也会回退到随机推荐。
 
-- 数据集：
-  - `ml1m`（MovieLens-1M）
-  - `amazon_all_beauty`
-  - `amazon_magazine_subscriptions`
-- 推荐模型：
-  - `sasrec`
-  - `lightgcn`
-  - `multvae`
-  - `poprec`
-  - `bprmf`
-  - `gru4rec`
-  - `bert4rec`
-- 核心后端接口：
-  - `GET /health`
-  - `GET /api/init`
-  - `POST /api/select`
-  - `POST /api/next`
-  - `POST /api/session/end`
-  - `GET /poster/<dataset_key>/<item_id>`
+## 技术栈
 
-## 目录结构
+- Python 3.11+
+- Flask
+- PyTorch
+- NumPy / pandas
+- 原生 HTML、CSS 和 JavaScript
+- CAMEL-AI / OpenAI 兼容接口
+- Playwright
 
-- `app.py`：Flask 入口与 API
-- `recommender.py`：数据目录解析、模型引擎封装、卡片生成
-- `dataset_utils.py`：训练数据加载（MovieLens/Amazon）
-- `train_*.py`：7 种模型训练脚本
-- `templates/` + `static/`：前端页面与脚本
-- `scripts/`：启动、停止、批量训练与维护脚本
-- `artifacts/`：模型权重与训练日志
-- `docs/`：系统图与 UML 文档
+## 快速开始
 
-## Start：环境安装
+### 1. 克隆并安装依赖
 
 ```bash
-cd /Users/chongzhang/WebSim
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
+git clone <your-repository-url>
+cd D8EAX
+python -m venv .venv
+```
+
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-`requirements.txt` 当前依赖：
-
-- `flask==3.0.2`
-- `torch>=2.6.0`
-- `pandas>=2.2.0`
-- `numpy>=1.26.0`
-
-## 数据准备
-
-默认会自动查找以下目录（也可用环境变量覆盖）：
-
-- `../WebSim_Dataset/MM-ML-1M-main`
-- `../WebSim_Dataset/Amazon_MM_2018/All_Beauty`
-- `../WebSim_Dataset/Amazon_MM_2018/Magazine_Subscriptions`
-- `../WebSim_Dataset/Amazon_MM_2018/Magazine_Subscriptions`
-
-各种新匹配持续更新中........
-
-
-## 快速启动
-
-### 1) 直接启动 Flask
+macOS / Linux：
 
 ```bash
-cd /Users/chongzhang/WebSim
-PORT=19001 python3 app.py
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-访问：
-
-- 首页网格页：`http://127.0.0.1:19001/`
-- 滑动页：`http://127.0.0.1:19001/swipe`
-- 健康检查：`http://127.0.0.1:19001/health`
-
-### 2) 推荐使用脚本启动滑动页
+如果需要运行浏览器 Agent，还需安装 Playwright 浏览器：
 
 ```bash
-cd ./WebSim
+python -m playwright install chromium
+```
+
+### 2. 准备数据集
+
+数据集和模型权重体积较大，不随 Git 仓库上传。推荐将数据放在项目同级的 `WebSim_Dataset` 目录：
+
+```text
+父目录/
+├── D8EAX/
+└── WebSim_Dataset/
+    ├── MM-ML-1M-main/
+    │   ├── ratings.dat
+    │   ├── movies.dat
+    │   ├── movies_details_clean.csv     # 可选
+    │   └── posters/                     # 可选
+    └── Amazon_MM_2018/
+        ├── All_Beauty/
+        │   ├── raw/*.json.gz
+        │   ├── raw/meta_*.json.gz
+        │   └── posters/                 # 可选
+        └── Magazine_Subscriptions/
+            ├── raw/*.json.gz
+            ├── raw/meta_*.json.gz
+            └── posters/                 # 可选
+```
+
+也可以通过环境变量指定任意数据目录：
+
+```powershell
+$env:ML1M_DATASET_DIR = "D:\datasets\MM-ML-1M-main"
+$env:AMAZON_ALL_BEAUTY_DATASET_DIR = "D:\datasets\All_Beauty"
+$env:AMAZON_MAGAZINE_SUBSCRIPTIONS_DATASET_DIR = "D:\datasets\Magazine_Subscriptions"
+```
+
+### 3. 准备模型权重
+
+默认权重目录为 `artifacts/`，命名规则如下：
+
+```text
+artifacts/
+├── sasrec_ml1m.pt
+├── lightgcn_ml1m.pt
+├── multvae_ml1m.pt
+├── poprec_ml1m.pt
+├── bprmf_ml1m.pt
+├── gru4rec_ml1m.pt
+└── bert4rec_ml1m.pt
+```
+
+Amazon 权重使用对应数据集后缀，例如：
+
+```text
+sasrec_amazon_all_beauty.pt
+bert4rec_amazon_magazine_subscriptions.pt
+```
+
+模型权重也可通过环境变量单独覆盖，详见下方“环境变量”。
+
+### 4. 启动服务
+
+```bash
+python app.py
+```
+
+默认监听 `127.0.0.1:19001`：
+
+- 网格推荐页：<http://127.0.0.1:19001/>
+- 滑动推荐页：<http://127.0.0.1:19001/swipe>
+- 健康检查：<http://127.0.0.1:19001/health>
+
+macOS / Linux 也可以使用脚本启动：
+
+```bash
 ./scripts/run_swipe_page.sh
+```
+
+该脚本默认使用端口 `19002`，并在服务就绪后打开滑动页面。停止服务：
+
+```bash
 ./scripts/stop_swipe_page.sh
 ```
 
-默认地址：
+## 交互页面
 
-- `http://127.0.0.1:19002/swipe`
-- `http://127.0.0.1:19002/health`
+### 网格页 `/`
 
-可选环境变量：
+- 每次展示 4 个随机或推荐条目。
+- 点击卡片后将条目加入最近 20 条交互历史，并生成下一批推荐。
+- 支持翻页、重置、评论、评论点赞以及历史评论显隐。
+- 卡片展示评分、基础热度和当前会话产生的曝光/点击增量。
 
-```bash
-HOST=127.0.0.1 PORT=19002 LOG_FILE=web.log OPEN_BROWSER=1 ./scripts/run_swipe_page.sh
-PORT=19002 ./scripts/stop_swipe_page.sh
-```
+### 滑动页 `/swipe`
 
-说明：
+- 一次展示一个条目。
+- 向上滑动表示选择当前条目，并据此刷新推荐。
+- 向下滑动浏览推荐列表中的下一项。
+- 支持键盘方向键操作。
 
-- `OPEN_BROWSER=0/false/no` 可禁用自动打开浏览器
-- `LOG_FILE` 若为相对路径，则按项目根目录解析
+## 训练推荐模型
 
-## API 简要说明
-
-### `GET /health`
-
-返回服务状态、每个数据集可用模型列表与默认模型。
-
-### `GET /api/init?dataset_key=...&model_name=...`
-
-初始化会话并返回第一屏随机卡片（默认为 4 条）。
-
-### `POST /api/select`
-
-根据点击项更新历史并返回推荐第一页。请求体示例：
-
-```json
-{
-  "movie_id": "296",
-  "dataset_key": "ml1m",
-  "model_name": "sasrec"
-}
-```
-
-### `POST /api/next`
-
-翻推荐下一页。请求体示例：
-
-```json
-{
-  "dataset_key": "ml1m"
-}
-```
-
-### `POST /api/session/end`
-
-清理当前 session 统计与历史状态。
-
-## 训练模型
-
-### 单模型训练
+七个模型均有独立训练入口。以下以 MovieLens-1M 为例：
 
 ```bash
-cd /Users/chongzhang/WebSim
-python3 train_sasrec.py   --dataset-dir /Users/chongzhang/WebSim_Dataset/MM-ML-1M-main --output-model artifacts/sasrec_ml1m.pt   --epochs 10 --eval-ks 10,20
-python3 train_lightgcn.py --dataset-dir /Users/chongzhang/WebSim_Dataset/MM-ML-1M-main --output-model artifacts/lightgcn_ml1m.pt --epochs 30 --eval-ks 10,20
-python3 train_multvae.py  --dataset-dir /Users/chongzhang/WebSim_Dataset/MM-ML-1M-main --output-model artifacts/multvae_ml1m.pt  --epochs 30 --eval-ks 10,20
+python train_poprec.py  --dataset-dir ../WebSim_Dataset/MM-ML-1M-main --output-model artifacts/poprec_ml1m.pt
+python train_sasrec.py  --dataset-dir ../WebSim_Dataset/MM-ML-1M-main --output-model artifacts/sasrec_ml1m.pt --epochs 10
+python train_lightgcn.py --dataset-dir ../WebSim_Dataset/MM-ML-1M-main --output-model artifacts/lightgcn_ml1m.pt --epochs 30
+python train_multvae.py --dataset-dir ../WebSim_Dataset/MM-ML-1M-main --output-model artifacts/multvae_ml1m.pt --epochs 30
+python train_bprmf.py   --dataset-dir ../WebSim_Dataset/MM-ML-1M-main --output-model artifacts/bprmf_ml1m.pt --epochs 50
+python train_gru4rec.py --dataset-dir ../WebSim_Dataset/MM-ML-1M-main --output-model artifacts/gru4rec_ml1m.pt --epochs 30
+python train_bert4rec.py --dataset-dir ../WebSim_Dataset/MM-ML-1M-main --output-model artifacts/bert4rec_ml1m.pt --epochs 30
 ```
 
-其它训练脚本：
+训练脚本会按时间顺序构造用户序列，并输出 Hit Rate、NDCG 等评估指标。可运行 `python <训练脚本> --help` 查看模型特有参数。
 
-- `train_poprec.py`
-- `train_bprmf.py`
-- `train_gru4rec.py`
-- `train_bert4rec.py`
-
-### Amazon_MM_2018 一键七模型训练
+macOS / Linux 可一键训练某个 Amazon 数据集的全部模型：
 
 ```bash
-cd /Users/chongzhang/WebSim
-./scripts/train_amazon_all_beauty_all.sh /Users/chongzhang/WebSim_Dataset/Amazon_MM_2018/All_Beauty
-./scripts/train_amazon_magazine_subscriptions_all.sh /Users/chongzhang/WebSim_Dataset/Amazon_MM_2018/Magazine_Subscriptions
+./scripts/train_amazon_all_beauty_all.sh
+./scripts/train_amazon_magazine_subscriptions_all.sh
 ```
 
-或使用通用脚本：
+通用入口：
 
 ```bash
 ./scripts/train_amazon_mm2018_all.sh <dataset_dir> <model_suffix>
 ```
 
-例如：
+## 虚拟用户 Agent
 
-```bash
-./scripts/train_amazon_mm2018_all.sh /Users/chongzhang/WebSim_Dataset/Amazon_MM_2018/All_Beauty amazon_all_beauty
+Agent 功能需要 OpenAI 兼容的大模型接口。请在项目根目录创建 `.env`；该文件已被 `.gitignore` 排除，不要提交密钥。
+
+```dotenv
+YUNWU_API_KEY=your_api_key
+YUNWU_BASE_URL=https://your-openai-compatible-endpoint/v1
+YUNWU_MODEL=your_model_name
 ```
 
-训练输出模型位于 `artifacts/*.pt`。
+### 生成用户画像
 
-可通过环境变量覆盖各模型训练 epoch：
+```bash
+python generate_profiles.py --count 100 --seed 42 --output profiles.jsonl
+```
 
-- `SASREC_EPOCHS`
-- `LIGHTGCN_EPOCHS`
-- `MULTVAE_EPOCHS`
-- `BPRMF_EPOCHS`
-- `GRU4REC_EPOCHS`
-- `BERT4REC_EPOCHS`
+每行是一名虚拟用户的 JSON 画像，包含人口属性、内容偏好、交互倾向和独立随机种子。
 
-## 环境变量（服务端）
+### 浏览器 Agent
 
-### 数据目录
+浏览器 Agent 通过 Playwright 操作正在运行的 WebSim 页面。先编辑 `agent_task.yaml`：
+
+```yaml
+websim_url: "http://127.0.0.1:19001/"
+dataset: "ml1m"
+model: "poprec"
+track: 5
+headless: true
+slow_mo_ms: 0
+human_delay_min_ms: 1000
+human_delay_max_ms: 2500
+```
+
+运行单个 Agent：
+
+```bash
+python websim_user_agent.py --profile-index 0 --profiles profiles.jsonl
+```
+
+并发运行多个浏览器 Agent：
+
+```bash
+python batch_runner.py --start-index 0 --count 10 --concurrency 2 --profiles profiles.jsonl
+```
+
+运行日志与截图会写入 `agent_runs/` 和 `batch_logs/`，这些运行产物不会提交到 Git。
+
+### 无浏览器大规模仿真
+
+`large_scale/large_scale_runner.py` 直接调用 WebSim 的 Python 环境与 LLM 策略，不启动浏览器，适合批量实验：
+
+```bash
+python -m large_scale.large_scale_runner \
+  --profiles profiles.jsonl \
+  --dataset ml1m \
+  --model poprec \
+  --count 100 \
+  --track 5 \
+  --batch-size 20 \
+  --max-concurrency 4
+```
+
+可选的画像选择方式：
+
+- `--profile-selection sequential`：从 `--start-index` 开始顺序选择。
+- `--profile-selection random`：随机抽样，可用 `--sample-seed` 保证复现。
+
+每次运行会在 `large_scale_runs/` 下生成：
+
+- `events.jsonl`：逐轮行为事件。
+- `summary.json`：实验汇总。
+- `memory.json`：按 Agent 保存的最终状态与历史。
+- `scheduler.log`：调度与错误日志。
+
+## API
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/health` | 检查数据集路径、可用模型和默认模型 |
+| `GET` | `/api/init` | 初始化会话并返回 4 个随机条目 |
+| `POST` | `/api/select` | 记录点击并根据历史生成推荐 |
+| `POST` | `/api/next` | 获取推荐结果的下一页 |
+| `GET` | `/api/comments` | 按数据集和条目查询评论 |
+| `POST` | `/api/comment` | 发布评论 |
+| `POST` | `/api/comment/like` | 为评论点赞 |
+| `POST` | `/api/session/end` | 清除当前仿真会话状态 |
+| `GET` | `/poster/<dataset_key>/<item_id>` | 返回条目海报或缺省 SVG |
+| `POST` | `/api/yunwu-test` | 测试大模型接口连接 |
+
+初始化示例：
+
+```bash
+curl "http://127.0.0.1:19001/api/init?dataset_key=ml1m&model_name=sasrec"
+```
+
+点击并请求推荐：
+
+```bash
+curl -X POST http://127.0.0.1:19001/api/select \
+  -H "Content-Type: application/json" \
+  -d '{"movie_id":"296","dataset_key":"ml1m","model_name":"sasrec"}'
+```
+
+接口使用 Flask Cookie Session 保存浏览历史，因此连续请求 API 时需要复用 Cookie。
+
+## 环境变量
+
+### 服务配置
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `19001` | Flask 服务端口 |
+| `FLASK_SECRET_KEY` | 启动时随机生成 | Session 签名密钥；稳定部署时应显式设置 |
+| `DEFAULT_DATASET_KEY` | `ml1m` | 默认数据集 |
+| `WEBSIM_INIT_RANDOM_SEED` | `42` | 初始随机采样种子 |
+
+### 数据集路径
 
 - `ML1M_DATASET_DIR`
 - `AMAZON_ALL_BEAUTY_DATASET_DIR`
 - `AMAZON_MAGAZINE_SUBSCRIPTIONS_DATASET_DIR`
-- `DEFAULT_DATASET_KEY`（默认 `ml1m`）
 
-### 服务
+### 模型路径
 
-- `PORT`（默认 `19001`，脚本一般使用 `19002`）
-- `FLASK_SECRET_KEY`
-- `WEBSIM_INIT_RANDOM_SEED`（初始化随机采样种子，默认 `42`）
+MovieLens-1M 同时支持通用别名：
 
-### 模型权重路径
+- `SASREC_ML1M_MODEL_PATH` 或 `SASREC_MODEL_PATH`
+- `LIGHTGCN_ML1M_MODEL_PATH` 或 `LIGHTGCN_MODEL_PATH`
+- `MULTVAE_ML1M_MODEL_PATH` 或 `MULTVAE_MODEL_PATH`
+- `POPREC_ML1M_MODEL_PATH` 或 `POPREC_MODEL_PATH`
+- `BPRMF_ML1M_MODEL_PATH` 或 `BPRMF_MODEL_PATH`
+- `GRU4REC_ML1M_MODEL_PATH` 或 `GRU4REC_MODEL_PATH`
+- `BERT4REC_ML1M_MODEL_PATH` 或 `BERT4REC_MODEL_PATH`
 
-- ML1M 支持：
-  - `SASREC_ML1M_MODEL_PATH`（或 `SASREC_MODEL_PATH`）
-  - `LIGHTGCN_ML1M_MODEL_PATH`（或 `LIGHTGCN_MODEL_PATH`）
-  - `MULTVAE_ML1M_MODEL_PATH`（或 `MULTVAE_MODEL_PATH`）
-  - `POPREC_ML1M_MODEL_PATH`（或 `POPREC_MODEL_PATH`）
-  - `BPRMF_ML1M_MODEL_PATH`（或 `BPRMF_MODEL_PATH`）
-  - `GRU4REC_ML1M_MODEL_PATH`（或 `GRU4REC_MODEL_PATH`）
-  - `BERT4REC_ML1M_MODEL_PATH`（或 `BERT4REC_MODEL_PATH`）
-- Amazon 数据集使用对应前缀变量，例如：
-  - `SASREC_AMAZON_ALL_BEAUTY_MODEL_PATH`
-  - `LIGHTGCN_AMAZON_MAGAZINE_SUBSCRIPTIONS_MODEL_PATH`
+Amazon 模型变量遵循以下格式：
 
-## scripts 清单
+```text
+<MODEL>_AMAZON_ALL_BEAUTY_MODEL_PATH
+<MODEL>_AMAZON_MAGAZINE_SUBSCRIPTIONS_MODEL_PATH
+```
 
-- `scripts/run_service.sh`：前台启动 Flask 服务（默认端口 `19002`）
-- `scripts/run_swipe_page.sh`：后台启动服务 + 健康检查 + 可选自动开浏览器
-- `scripts/stop_swipe_page.sh`：停止指定端口服务
-- `scripts/quit_service.sh`：`stop_swipe_page.sh` 别名
-- `scripts/train_amazon_mm2018_all.sh`：Amazon_MM_2018 七模型通用训练
-- `scripts/train_amazon_all_beauty_all.sh`：All_Beauty 七模型训练入口
-- `scripts/train_amazon_magazine_subscriptions_all.sh`：Magazine_Subscriptions 七模型训练入口
-- `scripts/monitor_train_progress.sh`：每 5 分钟输出训练进度日志
-- `scripts/commit.sh`：`git add -A` + `commit` + `pull --rebase` + `push`
+其中 `<MODEL>` 可取 `SASREC`、`LIGHTGCN`、`MULTVAE`、`POPREC`、`BPRMF`、`GRU4REC` 或 `BERT4REC`。
 
-项目根目录也提供兼容入口：
+## 项目目录
 
-- `run_service.sh`（转发到 `scripts/run_service.sh`）
-
-## docs 文档
-
-`docs/` 下提供了 UML 与系统图文档，包括：
-
-- `websim_system_uml.pdf`
-- `software_engineering_diagrams.md`
-- `UML_web_sim.pdf`
+```text
+D8EAX/
+├── app.py                         # Flask 服务与 API
+├── recommender.py                 # 数据目录与七种模型的统一推理入口
+├── dataset_utils.py               # MovieLens / Amazon 用户序列加载
+├── *_rec.py / *gcn.py / *vae.py  # 模型定义
+├── train_*.py                     # 各模型训练入口
+├── templates/                     # HTML 页面
+├── static/                        # 前端脚本与样式
+├── artifacts/                     # 权重、评论和训练结果
+├── generate_profiles.py           # 虚拟用户画像生成
+├── websim_user_agent.py           # 单个 Playwright Agent
+├── batch_runner.py                # 浏览器 Agent 并发调度
+├── large_scale/                   # 无浏览器的大规模仿真
+├── scripts/                       # 服务管理与批量训练脚本
+└── docs/                          # UML 和软件工程图
+```
 
 ## 常见问题
 
-### 1) `/health` 里某数据集 `available_models` 为空
+### `/health` 中数据集出现错误
 
-说明对应权重不存在或路径不正确。请检查 `artifacts/*.pt` 或模型路径环境变量。
+检查对应数据集目录是否存在，并确认目录结构符合上面的约定。自定义路径时使用数据集环境变量覆盖默认路径。
 
-### 2) 数据集路径找不到
+### `available_models` 为空
 
-优先确认默认目录结构是否存在；如果路径不同，使用数据目录环境变量显式指定。
+表示当前数据集没有找到任何 `.pt` 权重。页面仍会展示随机条目，但不会执行模型推荐。请训练模型，或通过模型路径环境变量指向已有权重。
 
-### 3) 推荐结果看起来像随机
+### 页面没有海报
 
-当选定模型不可用，后端会回退到随机样本，前端状态中会体现当前可用模型情况。
+海报是可选资源。系统找不到本地图片时会自动返回带条目标题的 SVG 占位图，不影响推荐和仿真流程。
 
-## 备注
+### Agent 提示缺少环境变量
 
-- `task.yaml` 保留给上层批量仿真/调度流程读取，Web 服务本身不依赖该文件启动。
-- `artifacts/` 中已有多批次权重与日志，可按文件名中的后缀区分数据集与实验批次。
+确认项目根目录存在 `.env`，且包含 `YUNWU_API_KEY`、`YUNWU_BASE_URL` 和 `YUNWU_MODEL`。接口必须兼容 OpenAI 风格的聊天补全调用。
+
+### Playwright 找不到浏览器
+
+执行：
+
+```bash
+python -m playwright install chromium
+```
+
+## 开发检查
+
+提交前可运行基础语法检查：
+
+```bash
+python -m compileall -q .
+```
+
+模型权重、数据集、`.env`、虚拟环境、日志和仿真结果均已在 `.gitignore` 中排除。
+
+## 文档
+
+更详细的系统结构与 UML 图位于 `docs/`：
+
+- `docs/software_engineering_diagrams.md`
+- `docs/software_engineering_diagrams.pdf`
+- `docs/websim_system_uml.pdf`
+
+## License
+
+当前仓库尚未包含开源许可证。在公开复用、分发或二次开发前，请先补充合适的 `LICENSE` 文件，并分别确认所用数据集的授权条款。
