@@ -45,7 +45,7 @@ Flask Web 服务（app.py）
 ### 1. 克隆并安装依赖
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/yuanyewu05/D8EAX.git
 cd D8EAX
 python -m venv .venv
 ```
@@ -226,6 +226,26 @@ Windows PowerShell：
   --max-retries 3 `
   --request-timeout 120 `
   --result-dir .\large_scale_runs
+```
+
+从 `profiles.jsonl` 中无放回随机选择 5 个用户画像，每个 Agent 最多交互 20 轮：
+
+```powershell
+.\.venv\Scripts\python.exe -m large_scale.large_scale_runner `
+  --count 5 `
+  --profile-selection random `
+  --profiles .\profiles.jsonl `
+  --track 20 `
+  --batch-size 5 `
+  --max-concurrency 2 `
+  --max-retries 3 `
+  --request-timeout 120
+```
+
+默认每次通常会抽到不同画像。如需复现同一组随机画像，在命令中增加：
+
+```powershell
+--sample-seed 42
 ```
 
 macOS / Linux：
