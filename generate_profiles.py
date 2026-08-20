@@ -6,6 +6,8 @@ import random
 from pathlib import Path
 from typing import Any
 
+from large_scale.risk_profiles import ensure_risk_profile
+
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -225,6 +227,7 @@ def generate_profile(
         "description": (
             f"{age}岁，属于{cohort_name}偏好群体的虚拟用户"
         ),
+
         "likes": likes,
         "dislikes": dislikes,
         "exploration_rate": rounded_uniform(
@@ -260,7 +263,7 @@ def generate_profile(
         "seed": agent_seed,
     }
 
-    return profile
+    return ensure_risk_profile(profile)
 
 
 def main() -> None:

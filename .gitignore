@@ -30,7 +30,10 @@ artifacts/backups/
 
 # Local datasets and generated archives
 WebSim_Dataset/
+KuaiSAR_data/
 *.zip
+kuaisar_baseline.json
+profiles_risk_test.jsonl
 
 # Generated documentation intermediates
 docs/*.aux

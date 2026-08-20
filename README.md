@@ -1,136 +1,251 @@
-# AgentRecSim：基于多 Agent 用户仿真的推荐系统评测框架
+# AgentRecSim：基于 LLM Agent 的推荐系统单会话沉迷风险评估框架
 
-AgentRecSim 的核心目标是：让多个具有不同用户画像的 LLM Agent 在推荐环境中模拟真人浏览行为，并通过它们产生的点击、翻页、停止及画像变化，评估不同推荐系统的表现。
+AgentRecSim 使用具有不同用户画像的 LLM Agent，在本地推荐环境中模拟点击、翻页和停止行为，并评估当前推荐系统下 Agent 满足“单会话沉迷风险”操作性标准的概率。
 
-项目中的 WebSim 不是研究终点，而是承载推荐结果和用户动作的仿真环境。核心实验不需要启动浏览器或 Flask 服务；多 Agent 运行器会直接调用 Python 推荐环境，并发完成大规模用户行为仿真。
+本项目将推荐算法与用户行为仿真分离：
 
-本项目并不是直接接入某个在线推荐平台，而是将公开数据集和推荐算法部署到本地，构建一个可控、可复现的推荐环境。推荐结果由本地推荐模型生成，LLM Agent 只负责根据用户画像和当前推荐内容做出 `click`、`next` 或 `stop` 的行为决策。这样的职责划分可以将推荐算法与用户行为仿真分离，便于在统一实验条件下比较不同推荐模型。
+- 本地推荐模型负责产生推荐结果；
+- 阿里云百炼上的千问模型负责根据用户画像、当前时间、生活目标、特殊事件和推荐内容作出 `click`、`next` 或 `stop` 决策；
+- 风险评估器根据行为日志机械计算活动异常、停止失败和目标冲突；
+- KuaiSAR 仅用于实验后的离线行为真实性评估，不影响 Agent 决策。
 
-## 研究流程
+> 当前系统估计的是“在指定推荐系统与实验场景下，满足单会话三层沉迷判定的 Agent 比例”。没有设置对照推荐系统时，该结果不能单独证明推荐系统造成了沉迷。
+
+## 研究问题
+
+项目当前主要回答以下问题：
+
+1. 不同用户画像在推荐系统中会产生怎样的点击、翻页和停止行为？
+2. Agent 是否会在偏离个人正常活动模式的时间继续使用系统？
+3. Agent 是否会出现“已经想停止，但仍继续点击或翻页”的停止失败？
+4. 继续使用是否影响睡眠、工作、学习或其他高优先级生活目标？
+5. 在当前推荐系统下，有多少可评估 Agent 满足单会话沉迷判定？
+6. Agent 的行为统计与 KuaiSAR 真人推荐日志有多相似？
+
+## 整体流程
+
+```mermaid
+flowchart TD
+    A[读取或生成用户画像] --> B[补齐活动基线与生活目标]
+    B --> C[应用无事件、随机事件或指定特殊事件]
+    C --> D[根据个人活动基线抽取会话开始时间]
+    D --> E[本地推荐模型生成推荐内容]
+    E --> F[千问 Agent 决策 click、next 或 stop]
+    F --> G[执行动作并推进仿真时间]
+    G --> H[记录活动异常、停止失败与目标冲突]
+    H --> I{Agent 是否停止或会话被终止}
+    I -- 否 --> E
+    I -- 是 --> J[生成单个 Agent 会话判定]
+    J --> K[汇总推荐系统沉迷风险概率]
+    K --> L[可选：使用 KuaiSAR 基线离线评估行为真实性]
+```
+
+核心实验不需要启动浏览器或 Flask 服务。`large_scale.large_scale_runner` 会直接调用本地推荐环境，并通过异步队列运行多个彼此隔离的 Agent。
+
+## 单会话沉迷风险判定
+
+### 第一层：使用行为偏离个人正常模式
+
+每个 Agent 都有 24 小时活动基线 `hourly_activity_baseline`。Agent 正在使用系统时，实际活动值记为 `1.0`：
 
 ```text
-静态用户画像 profiles.jsonl
-          │
-          ▼
-随机或顺序抽取多个用户
-          │
-          ▼
-为每名用户创建相互隔离的 Agent 状态
-          │
-          ▼
-推荐模型生成当前可见条目
-          │
-          ▼
-LLM Agent 根据画像、历史和当前推荐作出决策
-      click / next / stop
-          │
-          ▼
-执行动作并更新该 Agent 的动态画像
-          │
-          ▼
-继续下一轮，直到主动停止或达到最大轮数
-          │
-          ▼
-输出逐轮事件、最终记忆和实验汇总
+活动异常度 = 1.0 - 当前小时个人活动基线
 ```
 
-这个流程可用于研究：
+当活动异常度大于等于 `0.70` 时，本轮记为活动异常：
 
-- 不同推荐模型面对同一组虚拟用户时的行为差异；
-- 推荐结果能否促使不同类型用户点击；
-- 用户何时继续探索、何时主动结束会话；
-- 多轮交互后兴趣、满意度、耐心和疲劳度如何变化；
-- 不同画像群体在同一推荐模型下是否表现出不同反馈；
-- 大规模 Agent 实验的吞吐量、失败率和可复现性。
-
-## 核心能力
-
-- 多 Agent 仿真：一次实验运行多个相互独立的逻辑 Agent。
-- 画像驱动决策：每个 Agent 根据自己的长期画像、动态状态和当前推荐进行判断。
-- 真人式动作空间：Agent 每轮自主选择 `click`、`next` 或 `stop`。
-- 动态画像：每次操作后更新兴趣权重、满意度、耐心、疲劳、探索倾向和近期行为。
-- 无浏览器运行：核心实验无需启动网页或 Flask 服务，适合批量运行。
-- 异步并发：批量调度 Agent，并单独限制真实 LLM API 并发数。
-- 可复现实验：支持固定画像、随机抽样和随机种子。
-- 多推荐模型：支持 SASRec、LightGCN、Mult-VAE、PopRec、BPR-MF、GRU4Rec 和 BERT4Rec。
-- 多数据集：支持 MovieLens-1M、Amazon All Beauty 和 Amazon Magazine Subscriptions。
-- 完整日志：保存每轮决策、决策理由、画像变化、最终状态和汇总指标。
-
-## 快速运行多 Agent 实验
-
-### 1. 安装环境
-
-```bash
-git clone https://github.com/yuanyewu05/D8EAX.git
-cd D8EAX
-python -m venv .venv
+```text
+activity_anomaly >= 0.70
 ```
 
-Windows PowerShell：
+这一层比较的是 Agent 与自身正常模式的偏离，而不是所有用户共用同一时间阈值。
+
+### 第二层：Agent 想停止却继续
+
+千问每轮同时返回停止意图和实际动作。只有同时满足以下条件，才记为停止失败：
+
+```text
+动作执行成功
+and intended_to_stop = true
+and action in {click, next}
+```
+
+对应事件字段为 `stop_failure = true`。
+
+### 第三层：继续使用影响高优先级目标
+
+风险评估器使用本轮动作结束后的仿真时间检查 `daily_goals`。目标冲突需要同时满足：
+
+```text
+实际动作是 click 或 next
+and 当前时间处于某个目标时间段
+and 目标 priority >= 3
+and 距离目标开始的时间 >= tolerance_minutes
+```
+
+如果多个目标同时生效，优先检查优先级最高的目标。睡眠等跨午夜目标也会被正确识别。
+
+例如，睡眠目标为 23:00 至次日 07:00，优先级为 3，允许推迟 15 分钟。当本轮结束于 23:18 且 Agent 仍然点击时，睡眠已经推迟 18 分钟，因此形成目标冲突。
+
+### 最终个体判定
+
+当前代码采用以下操作性定义：
+
+```text
+本次会话中至少出现过一次活动异常
+and
+至少有一轮同时出现 stop_failure 和 goal_conflict
+```
+
+满足后，该 Agent 被标记为：
+
+```text
+addicted / 已陷入沉迷（单会话判定）
+```
+
+第一层活动异常可以出现在本次会话的其他轮次；第二层“想停却继续”和第三层“影响高优先级目标”必须在同一轮同时出现。
+
+### 会话状态
+
+| 状态 | 含义 | 是否进入点估计分母 |
+| --- | --- | --- |
+| `normal_use` | 没有活动异常 | 是 |
+| `high_engagement` | 有活动异常，但没有停止失败 | 是 |
+| `observe` | 有停止失败，但没有形成完整目标冲突证据 | 是 |
+| `addicted` | 满足单会话三层判定 | 是 |
+| `insufficient_data` | 缺少合法活动基线等必要数据 | 否 |
+| `safety_limit_censored` | 达到轮数或仿真时长安全上限，结果未确定 | 否 |
+| `externally_censored` | 停电等外部事件强制中断 | 否 |
+| `technical_failure_censored` | API 或程序错误导致中断 | 否 |
+
+如果在被截断前已经形成完整沉迷证据，`addicted` 判定优先保留。
+
+## 推荐系统沉迷风险概率
+
+系统级点估计为：
+
+```text
+沉迷风险概率 = addicted Agent 数 / 可评估 Agent 数
+```
+
+可评估 Agent 包括 `normal_use`、`high_engagement`、`observe` 和 `addicted`。程序同时输出：
+
+- 满足沉迷判定的 Agent ID；
+- 沉迷证据涉及的高优先级目标；
+- Wilson 95% 置信区间；
+- 安全上限截尾 Agent 数量；
+- 把安全截尾样本分别视为未沉迷或可能沉迷时的风险上下界。
+
+外部事件截尾和技术失败截尾不进入点估计，也不进入当前安全截尾上下界的分母。
+
+## 用户画像与个性化时间
+
+每个 Agent 包含两类状态：
+
+1. 静态画像：年龄、群体、内容偏好、厌恶项、探索倾向、流行度偏好、耐心和随机种子等；
+2. 动态画像：满意度、疲劳、耐心、点击历史、连续翻页、近期动作和兴趣权重等。
+
+风险判断还需要：
+
+- `routine_type`：`student`、`office_worker` 或 `retired`；
+- `hourly_activity_baseline`：24 小时个人活动基线；
+- `daily_goals`：工作、学习、睡眠、锻炼或长期目标；
+- 每个目标的开始时间、结束时间、优先级和容忍分钟数。
+
+旧画像缺少这些字段时，程序会根据年龄和固定随机种子补齐可复现的个性化默认值：
+
+- 年龄不超过 24 岁：学生；
+- 年龄达到 61 岁：退休用户；
+- 其余：上班族。
+
+每个 Agent 的会话开始时间不是统一设置为晚上，而是按修改后的个人活动基线加权抽样。低概率时段仍保留很小的被抽中概率，以便观察异常使用。
+
+## 特殊事件
+
+一次实验最多选择一个特殊事件。`random` 会根据 `--sample-seed` 为整次运行选择一个事件，但事件只对适用画像生效。
+
+| 参数值 | 适用对象 | 主要影响 |
+| --- | --- | --- |
+| `none` | 全部 | 不使用特殊事件 |
+| `random` | 取决于抽中的事件 | 从下列事件中可复现地随机选择一个 |
+| `summer_vacation` | 学生 | 暂停上课目标，提高白天与晚间活动基线，睡眠推迟 60 分钟 |
+| `holiday` | 学生、上班族 | 暂停上课或工作目标，提高白天活动基线，睡眠推迟 30 分钟 |
+| `power_outage` | 全部 | 20:00 至 21:00 服务不可用，会话可能被外部强制中断 |
+| `exam_week` | 学生 | 增加 18:30 至 22:30 高优先级复习目标，减少娱乐活动基线 |
+| `project_deadline` | 上班族 | 增加晚间高优先级项目目标，减少娱乐活动基线 |
+| `sick_leave` | 部分用户 | 以 35% 个体适用概率暂停日常目标，增加恢复目标并调整睡眠 |
+
+除停电会直接造成外部中断外，其他事件主要修改画像、生活目标和活动基线，不会强行指定 Agent 必须点击或停止。
+
+## 支持的推荐环境
+
+当前统一推荐接口支持 SASRec、LightGCN、Mult-VAE、PopRec、BPR-MF、GRU4Rec 和 BERT4Rec。
+
+支持的数据集包括 MovieLens-1M、Amazon All Beauty 和 Amazon Magazine Subscriptions。推荐模型在本地运行；LLM 只负责用户行为决策。
+
+## 快速开始
+
+### 1. 创建环境
+
+建议使用 Python 3.11 或 3.12。
 
 ```powershell
+git clone https://github.com/yuanyewu05/AgentRecSim.git
+Set-Location .\AgentRecSim
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-macOS / Linux：
-
-```bash
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-建议使用 Python 3.11 或 3.12。
-
-### 2. 配置 LLM 接口
+### 2. 配置阿里云百炼千问
 
 在项目根目录创建 `.env`：
 
 ```dotenv
-YUNWU_API_KEY=your_api_key
-YUNWU_BASE_URL=https://your-openai-compatible-endpoint/v1
-YUNWU_MODEL=your_model_name
+DASHSCOPE_API_KEY=你的阿里云百炼API_KEY
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_MODEL=qwen3.7-flash
 ```
 
-接口需要兼容 OpenAI Chat Completions。`.env` 已被 `.gitignore` 排除，请勿将真实 API Key 提交到 GitHub。
+`.env` 已被 `.gitignore` 排除。不要把真实 API Key 提交到 Git。
+
+可以先测试连接：
+
+```powershell
+python -c "from bailian_client import call_bailian; print(call_bailian('只返回：连接成功'))"
+```
 
 ### 3. 准备用户画像
 
-仓库中的 `profiles.jsonl` 可以直接用于实验。也可以重新生成画像：
+仓库中的 `profiles.jsonl` 可以直接使用，也可以重新生成：
 
-```bash
-python generate_profiles.py --count 100 --seed 42 --output profiles.jsonl
+```powershell
+python .\generate_profiles.py `
+  --count 100 `
+  --seed 42 `
+  --output profiles.jsonl
 ```
 
-文件每行表示一名虚拟用户，包含人口属性、内容偏好、厌恶项、探索倾向、流行度偏好、耐心和独立随机种子。
+### 4. 准备数据集和推荐模型
 
-### 4. 准备数据和推荐模型
-
-默认使用 MovieLens-1M 和 `poprec`。数据集建议放在项目同级目录：
+默认数据集为 `ml1m`，默认推荐模型为 `poprec`。建议的数据目录结构为：
 
 ```text
 父目录/
-├── D8EAX/
+├── AgentRecSim/
 └── WebSim_Dataset/
     ├── MM-ML-1M-main/
     │   ├── ratings.dat
     │   ├── movies.dat
-    │   ├── movies_details_clean.csv     # 可选
-    │   └── posters/                     # 可选
+    │   ├── movies_details_clean.csv
+    │   └── posters/
     └── Amazon_MM_2018/
         ├── All_Beauty/
-        │   ├── raw/*.json.gz
-        │   ├── raw/meta_*.json.gz
-        │   └── posters/                 # 可选
         └── Magazine_Subscriptions/
-            ├── raw/*.json.gz
-            ├── raw/meta_*.json.gz
-            └── posters/                 # 可选
 ```
 
-默认模型权重目录为 `artifacts/`：
+模型权重默认放在 `artifacts/`：
 
 ```text
 artifacts/
@@ -143,125 +258,175 @@ artifacts/
 └── bert4rec_ml1m.pt
 ```
 
-数据和权重未提交到 Git 仓库。缺少指定模型权重时，可以先运行对应的 `train_*.py` 训练脚本。数据和模型路径也可以通过环境变量覆盖，例如：
+数据集和权重路径可以通过项目已有的环境变量覆盖。
+
+## 运行实验
+
+所有命令都应在项目根目录执行。
+
+### 固定轮数：30 个 Agent、随机特殊事件
 
 ```powershell
-$env:ML1M_DATASET_DIR = "D:\datasets\MM-ML-1M-main"
-$env:POPREC_ML1M_MODEL_PATH = "D:\models\poprec_ml1m.pt"
-```
-
-### 5. 启动实验
-
-下面的命令从画像库中无放回随机抽取 5 名用户，每名 Agent 最多执行 20 轮，并允许最多 2 个 LLM 请求同时进行：
-
-Windows PowerShell：
-
-```powershell
-.\.venv\Scripts\python.exe -m large_scale.large_scale_runner `
-  --count 5 `
+python -m large_scale.large_scale_runner `
+  --count 30 `
   --profile-selection random `
   --sample-seed 42 `
   --profiles .\profiles.jsonl `
   --dataset ml1m `
   --model poprec `
-  --track 20 `
-  --batch-size 5 `
-  --max-concurrency 2 `
+  --track 10 `
+  --special-event random `
+  --batch-size 10 `
+  --max-concurrency 3 `
   --max-retries 3 `
   --request-timeout 120
 ```
 
-macOS / Linux：
+Agent 可以在达到第 10 轮之前主动停止；`--track 10` 只是轮数上限。
 
-```bash
-python -m large_scale.large_scale_runner \
-  --count 5 \
-  --profile-selection random \
-  --sample-seed 42 \
-  --profiles ./profiles.jsonl \
-  --dataset ml1m \
-  --model poprec \
-  --track 20 \
-  --batch-size 5 \
-  --max-concurrency 2 \
-  --max-retries 3 \
+### 自主运行模式
+
+不传入 `--track` 时，Agent 自主决定何时停止，安全上限用于避免无限运行：
+
+```powershell
+python -m large_scale.large_scale_runner `
+  --count 30 `
+  --profile-selection random `
+  --sample-seed 42 `
+  --profiles .\profiles.jsonl `
+  --dataset ml1m `
+  --model poprec `
+  --max-auto-steps 50 `
+  --max-session-minutes 120 `
+  --special-event none `
+  --batch-size 10 `
+  --max-concurrency 3 `
+  --max-retries 3 `
   --request-timeout 120
 ```
 
-核心实验不需要提前执行 `python app.py`，也不需要启动浏览器。
+达到安全上限仍未停止的 Agent 被标记为 `safety_limit_censored`，不会被当作正常使用。
 
-## Agent 如何模拟用户
+### 指定特殊事件
 
-每名 Agent 都有两层画像：
+例如只测试考试周：
 
-1. 静态画像：年龄、用户群体、喜欢与不喜欢的内容、流行度偏好、探索倾向等长期特征。
-2. 动态画像：当前兴趣权重、满意度、耐心、疲劳、连续翻页次数、累计点击和近期动作等会话状态。
+```powershell
+python -m large_scale.large_scale_runner `
+  --count 30 `
+  --profile-selection random `
+  --sample-seed 42 `
+  --model poprec `
+  --track 10 `
+  --special-event exam_week `
+  --max-concurrency 3
+```
 
-每轮决策时，LLM 会接收：
+考试周只对学生画像生效。其他画像会保留原有作息，并在日志中注明事件不适用。
 
-- 当前 Agent 的静态画像；
-- 经过前几轮操作更新后的动态画像；
-- 当前页面可见的推荐条目；
-- 最近点击和动作历史；
-- 是否还存在下一页。
+### 同时生成 KuaiSAR 真实性报告
 
-LLM 随后自主返回一种动作：
+```powershell
+python -m large_scale.large_scale_runner `
+  --count 30 `
+  --profile-selection random `
+  --sample-seed 42 `
+  --model poprec `
+  --track 10 `
+  --special-event random `
+  --max-concurrency 3 `
+  --realism-baseline .\kuaisar_baseline.json
+```
 
-| 动作 | 含义 | 对后续状态的影响 |
+## 命令行参数
+
+| 参数 | 含义 | 默认值 |
 | --- | --- | --- |
-| `click` | 对当前某个推荐条目感兴趣 | 记录点击、更新偏好，并根据新历史重新排序推荐 |
-| `next` | 当前条目吸引力不足，继续浏览 | 翻到下一页，同时增加浏览消耗和连续翻页状态 |
-| `stop` | 用户不愿继续当前会话 | 结束该 Agent，不再产生后续动作 |
-
-不同 Agent 的状态、历史和动态画像相互隔离。`--max-concurrency` 只控制同时发出的 LLM 请求数量，不会让不同 Agent 共享记忆。
-
-## 实验参数
-
-| 参数 | 说明 | 默认值 |
-| --- | --- | --- |
-| `--count` | 本次运行的 Agent 总数 | `2` |
-| `--profile-selection` | `sequential` 顺序选择或 `random` 随机选择画像 | `sequential` |
-| `--start-index` | 顺序选择时的起始画像索引 | `0` |
-| `--sample-seed` | 随机抽样种子；固定后可复现相同画像集合 | 无 |
-| `--profiles` | 用户画像 JSONL 文件 | `profiles.jsonl` |
+| `--start-index` | 顺序选择画像时的起始索引 | `0` |
+| `--count` | 本次运行的逻辑 Agent 数量 | `2` |
+| `--profile-selection` | `sequential` 或 `random` | `sequential` |
+| `--sample-seed` | 随机画像、事件和会话时间的实验种子 | 无 |
+| `--profiles` | 用户画像 JSONL 路径 | `profiles.jsonl` |
 | `--dataset` | 推荐数据集 | `ml1m` |
-| `--model` | 被评测的推荐模型 | `poprec` |
-| `--track` | 每名 Agent 的最大交互轮数 | `1` |
-| `--batch-size` | 每批提交到异步队列的 Agent 数量 | `20` |
-| `--max-concurrency` | 同时进行的真实 LLM API 请求上限 | `2` |
-| `--max-retries` | 单次决策最大尝试次数 | `3` |
-| `--request-timeout` | 单次 LLM 请求超时秒数 | `120` |
+| `--model` | 推荐模型 | `poprec` |
+| `--track` | 可选的最大交互轮数；省略时自主运行 | 无 |
+| `--max-auto-steps` | 自主运行模式的最大安全轮数 | `50` |
+| `--max-session-minutes` | 单次会话最大仿真分钟数 | `120` |
+| `--batch-size` | 每批提交给异步队列的 Agent 数量 | `20` |
+| `--max-concurrency` | 同时调用百炼 API 的最大 Agent 数量 | `2` |
+| `--max-retries` | 单次 LLM 决策最大尝试次数 | `3` |
+| `--request-timeout` | 单次百炼 API 请求超时秒数 | `120` |
 | `--result-dir` | 实验结果根目录 | `large_scale_runs` |
+| `--realism-baseline` | 可选的 KuaiSAR 基线 JSON | 无 |
+| `--special-event` | 无事件、随机事件或指定特殊事件 | `none` |
 
-`--batch-size` 不等于真实 API 并发数；实际并发由 `--max-concurrency` 控制。
+`--batch-size` 不等于 API 并发数。真实 API 并发由 `--max-concurrency` 控制。提高并发可能缩短运行时间，但也会增加限流和请求失败风险。
 
-## 输出与推荐系统评估
+查看当前代码支持的完整参数：
 
-每次运行会在 `large_scale_runs/<运行时间>_llm_large/` 下生成：
+```powershell
+python -m large_scale.large_scale_runner --help
+```
+
+## 实验输出
+
+每次实验会在以下目录生成结果：
+
+```text
+large_scale_runs/<时间戳>_llm_large/
+```
 
 | 文件 | 内容 |
 | --- | --- |
-| `events.jsonl` | 每轮 Agent 的动作、目标条目、决策理由、耗时以及画像更新前后状态 |
-| `summary.json` | Agent 数量、模型、数据集、事件数、点击数、翻页数、停止数、失败数和吞吐量 |
-| `memory.json` | 每名 Agent 的最终状态、点击历史、动作历史和动态画像 |
-| `scheduler.log` | 批次调度、API 重试、异常和运行进度 |
+| `events.jsonl` | 每轮时间、动作、停止意图、目标冲突、特殊事件、画像变化和 API 状态 |
+| `memory.json` | 每个 Agent 的最终状态、历史行为、动态画像和单会话风险摘要 |
+| `summary.json` | 实验配置、行为总数、终止状态、风险摘要和输出路径 |
+| `addiction_report.json` | 单个 Agent 判定、沉迷 Agent ID、系统风险概率、置信区间和风险上下界 |
+| `scheduler.log` | 批次调度、并发、重试、警告、失败和运行进度 |
+| `realism_report.json` | 指定 `--realism-baseline` 时生成的 KuaiSAR 离线真实性报告 |
 
-可以先固定画像抽样种子和其他实验参数，再分别修改 `--model` 运行多组实验。比较各组 `summary.json` 和 `events.jsonl`，即可分析不同推荐模型产生的点击、浏览深度、主动停止及用户群体差异。
+终端结束摘要会显示 Agent 数量、行为次数、各类截尾数量、风险概率、95% 置信区间、风险上下界、沉迷证据目标、沉迷 Agent ID 以及报告路径。
 
-需要注意：点击数、翻页数和停止数是仿真行为统计，不应单独视为推荐质量结论。更可靠的比较应同时控制画像集合、数据集、交互轮数、LLM 模型和提示词版本，并进行多次重复实验。
+## KuaiSAR 离线真实性评估
+
+KuaiSAR 原始数据只需离线处理一次。它不进入提示词，不参与推荐排序，也不会影响 Agent 的选择。
+
+### 生成真人行为基线
+
+```powershell
+python .\build_kuaisar_baseline.py `
+  --rec-inter .\KuaiSAR_data\KuaiSAR_final\rec_inter.csv `
+  --output .\kuaisar_baseline.json `
+  --session-gap-minutes 30
+```
+
+基线构建器会按 `user_id` 和 `timestamp` 在磁盘中排序数据，并重建会话，因此不要求原始 CSV 已预先排序。
+
+### 单独评估已有实验
+
+```powershell
+python -m large_scale.realism_evaluator `
+  --events .\large_scale_runs\运行目录\events.jsonl `
+  --baseline .\kuaisar_baseline.json `
+  --output .\large_scale_runs\运行目录\realism_report.json
+```
+
+真实性报告包含点击率及其 KuaiSAR 百分位、会话长度及其百分位、动作转移分布相似度和综合行为真实性得分。
+
+KuaiSAR 是短视频推荐数据，而当前主要实验是电影推荐环境；`click=0` 也只能近似为 `next`。因此真实性得分表示统计相似度，不等同于心理真实性或沉迷程度。
 
 ## 推荐模型训练
 
-MovieLens-1M 的七种模型可以分别训练：
+MovieLens-1M 模型可以分别训练：
 
-```bash
-python train_poprec.py
-python train_bprmf.py
-python train_lightgcn.py
-python train_multvae.py
-python train_gru4rec.py
-python train_sasrec.py
-python train_bert4rec.py
+```powershell
+python .\train_poprec.py
+python .\train_bprmf.py
+python .\train_lightgcn.py
+python .\train_multvae.py
+python .\train_gru4rec.py
+python .\train_sasrec.py
+python .\train_bert4rec.py
 ```
 
 Amazon 数据集提供批量训练脚本：
@@ -271,63 +436,83 @@ Amazon 数据集提供批量训练脚本：
 ./scripts/train_amazon_magazine_subscriptions_all.sh
 ```
 
-生成的 `.pt` 权重默认存放在 `artifacts/`，并被 `.gitignore` 排除。
+## 可选网页演示
 
-## 可选：WebSim 网页演示
-
-网页界面用于人工查看推荐和调试，不是运行多 Agent 实验的前置服务。
+网页界面只用于人工查看推荐结果和调试，不是多 Agent 实验的前置服务。
 
 ```powershell
-python app.py
+python .\app.py
 ```
 
-然后访问：
-
-```text
-http://127.0.0.1:19001
-```
-
-网页服务提供数据集与模型选择、卡片点击、翻页、评论和会话统计等功能。可以通过以下接口检查配置：
-
-```bash
-curl http://127.0.0.1:19001/health
-```
+然后访问 `http://127.0.0.1:19001`。
 
 ## 项目结构
 
 ```text
-D8EAX/
+AgentRecSim/
 ├── large_scale/
-│   ├── large_scale_runner.py   # 多 Agent 异步实验入口
-│   ├── llm_policy.py           # LLM 用户决策与输出校验
-│   ├── profile_updater.py      # 每轮操作后的动态画像更新
-│   ├── websim_env.py           # 无浏览器推荐交互环境
-│   ├── rule_policy.py          # 轻量规则策略
-│   └── genre_utils.py          # 标签与类型处理
-├── profiles.jsonl              # 用户画像库
-├── generate_profiles.py        # 用户画像生成器
-├── recommender.py              # 多推荐模型统一加载与推理
-├── app.py                      # 可选的 WebSim 网页服务
-├── train_*.py                  # 推荐模型训练脚本
-├── artifacts/                  # 本地模型权重
-├── scripts/                    # 服务和批量训练脚本
-├── templates/                  # 网页模板
-├── static/                     # 网页静态资源
+│   ├── large_scale_runner.py    # 多 Agent 异步实验入口与结果汇总
+│   ├── llm_policy.py            # 阿里云百炼千问决策与 JSON 校验
+│   ├── websim_env.py            # 无浏览器推荐交互环境
+│   ├── profile_updater.py       # 动作后的动态画像更新
+│   ├── risk_profiles.py         # 个性化活动基线、目标与开始时间
+│   ├── risk_evaluator.py        # 三层单会话判定与系统风险概率
+│   ├── special_events.py        # 特殊事件选择、适用性与画像修改
+│   ├── kuaisar_baseline.py      # KuaiSAR 基线构建
+│   ├── realism_evaluator.py     # 行为真实性离线评估
+│   ├── rule_policy.py           # 可选规则策略
+│   └── genre_utils.py           # 内容标签处理
+├── tests/
+│   ├── test_risk_evaluator.py
+│   ├── test_special_events.py
+│   └── test_realism_evaluator.py
+├── generate_profiles.py         # 用户画像生成器
+├── build_kuaisar_baseline.py    # KuaiSAR 基线命令行入口
+├── bailian_client.py            # 百炼连接测试客户端
+├── recommender.py               # 多推荐模型统一加载与推理
+├── app.py                       # 可选网页服务
+├── train_*.py                   # 推荐模型训练脚本
+├── profiles.jsonl               # 默认用户画像库
+├── artifacts/                   # 本地推荐模型权重
+├── scripts/                     # 服务与训练脚本
 └── requirements.txt
 ```
 
-## 实验复现建议
+## 运行测试
 
-- 固定 `--sample-seed`，保证不同推荐模型使用同一组用户画像。
-- 固定 `YUNWU_MODEL` 和提示词代码版本，避免决策策略发生变化。
-- 对每个推荐模型运行多组不同种子的实验，不以单次结果下结论。
-- 同时保存 `summary.json`、`events.jsonl` 和代码提交号。
-- 比较模型时保持 `--count`、`--track`、并发和超时参数一致。
-- 公开实验结果时说明所用数据、推荐权重、LLM 服务和采样配置。
+```powershell
+python -m unittest discover -s tests -v
+```
 
-## 安全说明
+测试覆盖个性化风险画像、会话开始时间、三层沉迷判定、系统风险汇总、特殊事件、外部中断、KuaiSAR 基线构建和真实性评估。
 
-- 不要提交 `.env`、API Key 或其他凭据。
-- 数据集和 `.pt` 模型权重默认不纳入 Git。
-- 实验输出可能包含完整用户画像和决策理由，公开前请检查内容。
-- 仿真 Agent 的行为不等同于真实用户研究结论，需要结合真实数据验证。
+## 推荐的实验设计
+
+如果要比较不同推荐系统，建议：
+
+1. 固定 `--sample-seed`，保证画像集合、随机特殊事件和开始时间可复现；
+2. 固定 Agent 数量、会话模式、千问模型、提示词代码和并发配置；
+3. 只改变 `--model`，分别运行实验；
+4. 每个推荐模型使用多个随机种子重复实验；
+5. 同时报告点估计、95% 置信区间、截尾数量和风险上下界；
+6. 比较前确认不同实验的可评估 Agent 数量；
+7. 保存结果目录、代码提交号、模型权重版本和数据集版本。
+
+如果研究目标是证明推荐系统“导致”沉迷风险上升，需要为相同画像设置基准或对照推荐系统，并比较两组风险，而不能只依据单组概率作因果结论。
+
+## 当前限制
+
+- 当前沉迷判断是单会话操作性定义，不是临床诊断；
+- “目标延误分钟数”按当前时间距离目标开始时间计算，不能证明全部延误都由推荐系统造成；
+- 第一层活动基线和默认生活目标是按画像规则生成的模拟数据，需要真实用户数据进一步校准；
+- LLM Agent 的自述停止意图不等同于真实人的心理状态；
+- 达到安全上限的会话存在截尾不确定性；
+- KuaiSAR 与当前电影推荐环境存在领域差异；
+- 单组实验只能描述当前系统下的风险比例，不能直接作因果归因。
+
+## 安全与数据说明
+
+- 不要提交 `.env`、API Key 或其他凭据；
+- 数据集、KuaiSAR 原始数据和 `.pt` 权重通常体积较大，不应直接提交到 Git；
+- 实验日志可能包含完整用户画像和 LLM 决策理由，公开前需要检查；
+- 仿真结果不等同于真实用户研究结论，应结合真实数据、对照实验和统计检验解释。

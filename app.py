@@ -9,7 +9,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, render_template, request, send_file, session
 
 from recommender import MovieRecommender
-from yunwu_client import call_yunwu
+from bailian_client import call_bailian
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -876,19 +876,19 @@ def poster(dataset_key: str, item_id: str):
 </svg>"""
     return Response(svg, mimetype="image/svg+xml")
 
-@app.route("/api/yunwu-test", methods=["POST"])
-def api_yunwu_test():
-    """测试 WebSim 是否能够调用云雾 API。"""
+@app.route("/api/bailian-test", methods=["POST"])
+def api_bailian_test():
+    """测试WebSim是否能够调用阿里云百炼API。"""
 
     payload = request.get_json(silent=True) or {}
 
     prompt = str(
         payload.get("prompt")
-        or "只回复：WebSim项目已成功接入云雾API"
+        or "只回复：WebSim项目已成功接入阿里云百炼API"
     ).strip()
 
     try:
-        answer = call_yunwu(prompt)
+        answer = call_bailian(prompt)
 
         return jsonify(
             {
