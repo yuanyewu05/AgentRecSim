@@ -14,6 +14,13 @@ from large_scale.genre_utils import (
 
 ActionType = Literal["click", "next", "stop"]
 
+# 每种动作消耗的仿真时间，单位为分钟。
+ACTION_DURATION_MINUTES = {
+    "click": 5,
+    "next": 2,
+    "stop": 0,
+}
+
 
 @dataclass(slots=True)
 class AgentState:
@@ -23,6 +30,13 @@ class AgentState:
     profile_index: int
     profile: dict[str, Any]
     seed: int
+
+    # 本次会话的开始时间；1370仅为兼容性默认值。
+    # 正常批量运行时会按个人活动基线随机覆盖。
+    session_start_minute: int = 1370
+
+    # 当前仿真时间，保存从当天00:00开始经过的分钟数。
+    simulation_minute: int = 1370
 
     # 用户已经点击过的物品。
     history: list[str] = field(default_factory=list)
@@ -53,9 +67,26 @@ class AgentState:
 class AgentAction:
     """Agent向WebSim环境提交的动作。"""
 
+    # Agent 最终实际执行的动作。
     action: ActionType
+
+    # click 动作选择的内容ID。
     item_id: str | None = None
+
+    # 实际执行该动作的原因。
     reason: str = ""
+
+    # Agent 在执行动作前，是否产生了停止意图。
+    #
+    # True：
+    # Agent认为自己应该停止或想要停止。
+    #
+    # False：
+    # Agent当前没有停止意图。
+    intended_to_stop: bool = False
+
+    # Agent为什么产生或没有产生停止意图。
+    intention_reason: str = ""
 
 
 class WebSimEnvironment:
@@ -241,6 +272,9 @@ class WebSimEnvironment:
         state.mode = "random"
         state.stopped = False
         state.step = 0
+        state.simulation_minute = (
+            state.session_start_minute
+        )
 
         return self._cards_from_ids(state.rec_ids)
 
@@ -268,6 +302,18 @@ class WebSimEnvironment:
             return []
 
         state.step += 1
+
+        # 根据动作类型推进仿真时间。
+        action_duration = ACTION_DURATION_MINUTES.get(
+            action.action
+        )
+
+        if action_duration is None:
+            raise ValueError(
+                f"未知动作：{action.action}"
+            )
+
+        state.simulation_minute += action_duration
 
         # 停止交互。
         if action.action == "stop":

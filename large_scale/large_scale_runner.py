@@ -11,6 +11,25 @@ from pathlib import Path
 from typing import Any
 
 from large_scale.llm_policy import LLMPolicy
+from large_scale.risk_evaluator import (
+    evaluate_activity_anomaly,
+    evaluate_goal_conflict,
+    summarize_recommender_addiction_risk,
+    summarize_session,
+)
+from large_scale.realism_evaluator import (
+    evaluate_events_file,
+)
+from large_scale.risk_profiles import (
+    ensure_risk_profile,
+    sample_session_start_minute,
+)
+from large_scale.special_events import (
+    SPECIAL_EVENT_CHOICES,
+    active_external_interruption,
+    apply_special_event,
+    select_special_event,
+)
 from large_scale.profile_updater import (
     initialize_dynamic_profile,
     update_dynamic_profile,
@@ -22,8 +41,7 @@ from large_scale.websim_env import (
 )
 
 
-# 项目根目录：
-# C:\Users\wyy05\Desktop\D8EAX
+# 项目根目录。
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_PROFILES_PATH = BASE_DIR / "profiles.jsonl"
@@ -89,6 +107,8 @@ def load_profiles(
                     f"画像文件第{line_index + 1}行"
                     "不是JSON对象"
                 )
+
+            profile = ensure_risk_profile(profile)
 
             # 没有agent_id时，根据原始行号生成。
             profile.setdefault(
@@ -156,6 +176,7 @@ def load_profiles(
 
 def create_agent_states(
     profiles: list[dict[str, Any]],
+    session_time_seed: int,
 ) -> list[AgentState]:
     """根据画像创建相互独立的逻辑Agent状态。"""
 
@@ -180,11 +201,19 @@ def create_agent_states(
             )
         )
 
+        session_start_minute = sample_session_start_minute(
+            profile=profile,
+            experiment_seed=session_time_seed,
+            day_number=1,
+        )
+
         state = AgentState(
             agent_id=agent_id,
             profile_index=profile_index,
             profile=profile,
             seed=seed,
+            session_start_minute=session_start_minute,
+            simulation_minute=session_start_minute,
         )
 
         # 根据原始用户画像，生成该Agent独立的动态画像。
@@ -274,6 +303,21 @@ def format_visible_cards(
 
     return visible_cards
 
+def format_simulation_time(
+    total_minutes: int,
+) -> str:
+    """把仿真分钟转换成第几天和具体时间。"""
+
+    day_number = total_minutes // 1440 + 1
+    minute_of_day = total_minutes % 1440
+
+    hour = minute_of_day // 60
+    minute = minute_of_day % 60
+
+    return (
+        f"day_{day_number:02d} "
+        f"{hour:02d}:{minute:02d}"
+    )
 
 async def process_one_agent(
     state: AgentState,
@@ -295,6 +339,23 @@ async def process_one_agent(
         state.history
     )
 
+    # 保存本轮动作执行前的仿真时间。
+    simulation_minute_before = int(
+        state.simulation_minute
+    )
+
+    # 根据当前时间和个人24小时基线，
+    # 计算本轮活动异常度。
+    activity_evaluation = (
+        evaluate_activity_anomaly(
+            profile=state.profile,
+            simulation_minute=(
+                simulation_minute_before
+            ),
+            actual_activity=1.0,
+        )
+    )
+
     visible_cards = format_visible_cards(
         cards
     )
@@ -310,64 +371,31 @@ async def process_one_agent(
     # 保存本轮画像具体发生了什么变化。
     profile_update: dict[str, Any] = {}
 
+    # 外部事件（例如停电）可能强制中断会话。
+    external_interruption = active_external_interruption(
+        profile=state.profile,
+        simulation_minute=simulation_minute_before,
+    )
+
     started_at = time.perf_counter()
 
     try:
-        # 使用CAMEL和云雾大模型作出决策。
-        # 取得当前动态耐心。
-        current_patience = float(
-            state.dynamic_profile.get(
-                "current_patience",
-                1.0,
-            )
-        )
-
-        consecutive_next = int(
-            state.dynamic_profile.get(
-                "consecutive_next",
-                0,
-            )
-        )
-
-        boredom = float(
-            state.dynamic_profile.get(
-                "boredom",
-                0.0,
-            )
-        )
-
-        # 动态画像达到停止条件时，
-        # 本地程序直接决定stop，不再浪费一次云雾API请求。
-        if current_patience <= 0.05:
+        # 只有停电等真实外部事件可以强制中断。
+        # 耐心、无聊和连续翻页仅作为画像信号交给大模型，
+        # 不再由本地阈值替Agent决定stop。
+        if external_interruption is not None:
             action = AgentAction(
                 action="stop",
                 reason=(
-                    "当前耐心已经接近耗尽，"
-                    "用户停止继续浏览"
+                    f"{external_interruption.get('event_name', '外部事件')}"
+                    "导致推荐系统暂时不可用，会话被迫中断"
                 ),
-            )
-
-        elif boredom >= 0.80:
-            action = AgentAction(
-                action="stop",
-                reason=(
-                    "当前无聊程度已经很高，"
-                    "用户停止继续浏览"
-                ),
-            )
-
-        elif consecutive_next >= 8:
-            action = AgentAction(
-                action="stop",
-                reason=(
-                    "用户已经连续翻页多次，"
-                    "决定结束本次浏览"
-                ),
+                intended_to_stop=False,
+                intention_reason="用户没有主动停止，由外部事件中断",
             )
 
         else:
-            # 没有达到硬性停止条件时，
-            # 再交给CAMEL和云雾大模型自主决策。
+            # 正常情况下始终由Agent自主选择click、next或stop。
             action = await policy.decide(
                 state=state,
                 cards=cards,
@@ -418,9 +446,6 @@ async def process_one_agent(
         success = True
         error_message = None
 
-        success = True
-        error_message = None
-
     except Exception as error:
         # LLMPolicy内部已经重试过。
         # 最终仍失败时停止该Agent并记录错误。
@@ -441,6 +466,33 @@ async def process_one_agent(
             f"{type(error).__name__}: {error}"
         )
 
+    # 保存动作执行后的仿真时间。
+    simulation_minute_after = int(
+        state.simulation_minute
+    )
+
+    # 判断本轮行为是否影响高优先级目标。
+    goal_evaluation = evaluate_goal_conflict(
+        profile=state.profile,
+        simulation_minute_after=(
+            simulation_minute_after
+        ),
+        action=action.action,
+    )
+
+    # 判断是否出现“想停止却继续”。
+    #
+    # 只有动作成功执行，并且Agent已经产生停止意图，
+    # 但实际动作仍然是click或next，才算停止失败。
+    stop_failure = bool(
+        success
+        and action.intended_to_stop
+        and action.action in {
+            "click",
+            "next",
+        }
+    )
+
     # 无论成功或失败，都保存本轮结束时的画像。
     dynamic_profile_after = deepcopy(
         state.dynamic_profile
@@ -454,6 +506,30 @@ async def process_one_agent(
     event = {
         "run_id": run_id,
         "simulation_step": simulation_step,
+        "simulation_minute_before": (
+            simulation_minute_before
+        ),
+        "simulation_minute_after": (
+            simulation_minute_after
+        ),
+        "simulation_time_before": (
+            format_simulation_time(
+                simulation_minute_before
+            )
+        ),
+        "simulation_time_after": (
+            format_simulation_time(
+                simulation_minute_after
+            )
+        ),
+        "current_hour": (
+                simulation_minute_before
+                % 1440
+                // 60
+        ),
+        "activity_evaluation": (
+            activity_evaluation
+        ),
         "agent_id": state.agent_id,
         "profile_index": state.profile_index,
         "profile_number": (
@@ -465,7 +541,7 @@ async def process_one_agent(
         ),
         "dataset": dataset,
         "model": model,
-        "policy": "camel_yunwu_llm",
+        "policy": "camel_bailian_qwen_llm",
         "visible_cards": visible_cards,
         "history_before": history_before,
 
@@ -474,9 +550,37 @@ async def process_one_agent(
         "profile_update": profile_update,
         "dynamic_profile_after": dynamic_profile_after,
 
+                # Agent动作前的停止意图。
+        "intended_to_stop": bool(
+            action.intended_to_stop
+        ),
+        "intention_reason": (
+            action.intention_reason
+        ),
+
+        # Agent最终实际执行的动作。
         "action": action.action,
         "item_id": action.item_id,
         "reason": action.reason,
+
+        # 是否出现“想停止却继续”。
+        "stop_failure": stop_failure,
+        # 当前生活目标和目标冲突结果。
+        "goal_evaluation": (
+            goal_evaluation
+        ),
+        "goal_conflict": bool(
+            goal_evaluation.get(
+                "goal_conflict",
+                False,
+            )
+        ),
+        "special_event": deepcopy(
+            state.profile.get("special_event")
+        ),
+        "external_interruption": (
+            external_interruption is not None
+        ),
         "history_after": list(
             state.history
         ),
@@ -499,7 +603,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         description=(
-            "CAMEL+云雾大模型的WebSim"
+            "CAMEL+阿里云百炼大模型的WebSim"
             "无浏览器大规模Agent运行器"
         )
     )
@@ -567,8 +671,31 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--track",
         type=int,
-        default=1,
-        help="每个Agent最多交互多少轮",
+        default=None,
+        help=(
+            "可选的实验轮数上限；不填写时进入Agent自主运行模式，"
+            "由max-auto-steps和max-session-minutes负责安全兜底"
+        ),
+    )
+
+    parser.add_argument(
+        "--max-auto-steps",
+        type=int,
+        default=50,
+        help=(
+            "未填写track时，每个Agent自主运行的最大安全交互轮数；"
+            "仅用于防止无限运行，不要求Agent必须运行到该轮数"
+        ),
+    )
+
+    parser.add_argument(
+        "--max-session-minutes",
+        type=int,
+        default=120,
+        help=(
+            "每个Agent单次会话最多推进多少个仿真分钟；"
+            "达到后标记为安全截断"
+        ),
     )
 
     parser.add_argument(
@@ -585,7 +712,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--max-concurrency",
         type=int,
         default=2,
-        help="同时调用云雾API的最大Agent数量",
+        help="同时调用阿里云百炼API的最大Agent数量",
     )
 
     parser.add_argument(
@@ -599,7 +726,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--request-timeout",
         type=float,
         default=120.0,
-        help="单次云雾API请求的超时秒数",
+        help="单次阿里云百炼API请求的超时秒数",
     )
 
     parser.add_argument(
@@ -607,6 +734,28 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_RESULT_DIR,
         help="实验结果目录",
+    )
+
+    parser.add_argument(
+        "--realism-baseline",
+        type=Path,
+        default=None,
+        help=(
+            "可选的KuaiSAR基线JSON；指定后在实验结束时"
+            "离线生成realism_report.json"
+        ),
+    )
+
+    parser.add_argument(
+        "--special-event",
+        type=str,
+        choices=SPECIAL_EVENT_CHOICES,
+        default="none",
+        help=(
+            "特殊事件情景：none不使用；random随机选择；"
+            "也可指定summer_vacation、holiday、power_outage、"
+            "exam_week、project_deadline或sick_leave"
+        ),
     )
 
     return parser
@@ -626,9 +775,14 @@ async def async_main() -> None:
             "--count必须大于0"
         )
 
-    if args.track <= 0:
+    if args.track is not None and args.track <= 0:
         raise ValueError(
             "--track必须大于0"
+        )
+
+    if args.max_auto_steps <= 0:
+        raise ValueError(
+            "--max-auto-steps必须大于0"
         )
 
     if args.batch_size <= 0:
@@ -665,6 +819,37 @@ async def async_main() -> None:
             BASE_DIR / result_dir
         )
 
+    if args.max_session_minutes <= 0:
+        raise ValueError(
+            "--max-session-minutes必须大于0"
+        )
+
+    autonomous_mode = args.track is None
+    execution_mode = (
+        "autonomous_until_stop"
+        if autonomous_mode
+        else "explicit_track_limit"
+    )
+    effective_max_steps = (
+        args.max_auto_steps
+        if autonomous_mode
+        else args.track
+    )
+
+    realism_baseline_path = (
+        args.realism_baseline
+    )
+    if realism_baseline_path is not None:
+        if not realism_baseline_path.is_absolute():
+            realism_baseline_path = (
+                BASE_DIR / realism_baseline_path
+            )
+        if not realism_baseline_path.is_file():
+            raise FileNotFoundError(
+                "找不到KuaiSAR真实性基线："
+                f"{realism_baseline_path}"
+            )
+
     profiles = load_profiles(
         profiles_path=profiles_path,
         count=args.count,
@@ -685,12 +870,60 @@ async def async_main() -> None:
         for profile in profiles
     ]
 
+    session_time_seed = (
+        args.sample_seed
+        if args.sample_seed is not None
+        else random.SystemRandom().randrange(
+            0,
+            2**63,
+        )
+    )
+
+    selected_special_event = select_special_event(
+        requested_event=args.special_event,
+        seed=session_time_seed,
+    )
+    profiles = [
+        apply_special_event(
+            profile,
+            selected_special_event,
+        )
+        for profile in profiles
+    ]
+    special_event_affected_agent_count = sum(
+        1
+        for profile in profiles
+        if profile.get("special_event", {}).get("applicable") is True
+    )
+    special_event_summary: dict[str, Any] = {
+        "mode": args.special_event,
+        "selected_event_id": (
+            selected_special_event.get("event_id")
+            if selected_special_event is not None
+            else "none"
+        ),
+        "selected_event_name": (
+            selected_special_event.get("event_name")
+            if selected_special_event is not None
+            else "无特殊事件"
+        ),
+        "description": (
+            selected_special_event.get("description")
+            if selected_special_event is not None
+            else None
+        ),
+        "affected_agent_count": (
+            special_event_affected_agent_count
+        ),
+    }
+
     states = create_agent_states(
-        profiles
+        profiles,
+        session_time_seed=session_time_seed,
     )
 
     print("=" * 65)
-    print("WebSim CAMEL+云雾AI大规模Agent实验")
+    print("WebSim CAMEL+阿里云百炼大规模Agent实验")
     print(f"Agent数量：{args.count}")
     print(
         f"画像选择模式："
@@ -725,16 +958,49 @@ async def async_main() -> None:
         )
     print(f"数据集：{args.dataset}")
     print(f"推荐模型：{args.model}")
-    print(f"交互轮数：{args.track}")
+    print(
+        "运行模式："
+        + (
+            "Agent自主运行直到主动停止"
+            if autonomous_mode
+            else "指定track轮数上限"
+        )
+    )
+    print(f"最大安全交互轮数：{effective_max_steps}")
+    print(
+        "最大安全仿真时长："
+        f"{args.max_session_minutes}分钟"
+    )
+    print(
+        "会话开始时间：按个人24小时活动基线随机抽取"
+    )
+    print(f"会话时间随机种子：{session_time_seed}")
+    if selected_special_event is None:
+        print("特殊事件：无")
+    else:
+        print(
+            "特殊事件："
+            f"{selected_special_event['event_name']} "
+            f"({selected_special_event['event_id']})"
+        )
+        print(
+            "特殊事件适用Agent数量："
+            f"{special_event_affected_agent_count}"
+        )
     print(f"任务批大小：{args.batch_size}")
     print(
-        f"云雾API最大并发："
+        f"阿里云百炼API最大并发："
         f"{args.max_concurrency}"
     )
     print(
         f"单次请求超时："
         f"{args.request_timeout}秒"
     )
+    if realism_baseline_path is not None:
+        print(
+            "实验结束后执行KuaiSAR离线真实性评估："
+            f"{realism_baseline_path}"
+        )
     print("=" * 65)
 
     print("正在加载无浏览器WebSim环境……")
@@ -795,6 +1061,11 @@ async def async_main() -> None:
         / "memory.json"
     )
 
+    addiction_report_path = (
+        run_directory
+        / "addiction_report.json"
+    )
+
     scheduler_log_path = (
         run_directory
         / "scheduler.log"
@@ -837,6 +1108,9 @@ async def async_main() -> None:
     else None
 ),
 "sample_seed": args.sample_seed,
+"session_time_seed": session_time_seed,
+"session_start_sampling": "profile_activity_weighted_random",
+"special_event": special_event_summary,
 "selected_profile_indices": (
     selected_profile_indices
 ),
@@ -846,7 +1120,11 @@ async def async_main() -> None:
 "agent_count": args.count,
             "dataset": args.dataset,
             "model": args.model,
-            "track": args.track,
+            "execution_mode": execution_mode,
+            "requested_track": args.track,
+            "max_auto_steps": args.max_auto_steps,
+            "effective_max_steps": effective_max_steps,
+            "max_session_minutes": args.max_session_minutes,
             "batch_size": args.batch_size,
             "max_api_concurrency": (
                 args.max_concurrency
@@ -854,7 +1132,12 @@ async def async_main() -> None:
             "max_retries": (
                 args.max_retries
             ),
-            "policy": "camel_yunwu_llm",
+            "policy": "camel_bailian_qwen_llm",
+            "realism_baseline": (
+                str(realism_baseline_path)
+                if realism_baseline_path is not None
+                else None
+            ),
         },
         "agents": {},
     }
@@ -878,6 +1161,11 @@ async def async_main() -> None:
                 state.profile_index + 1
             ),
             "profile": clean_profile,
+            "session_start_minute": state.session_start_minute,
+            "session_start_time": format_simulation_time(
+                state.session_start_minute
+            ),
+            "termination": None,
             "steps": [],
         }
 
@@ -890,7 +1178,9 @@ async def async_main() -> None:
 
     scheduler_log(
         f"运行配置 | "
-        f"track={args.track} | "
+        f"mode={execution_mode} | "
+        f"max_steps={effective_max_steps} | "
+        f"max_session_minutes={args.max_session_minutes} | "
         f"batch_size={args.batch_size} | "
         f"max_api_concurrency="
         f"{args.max_concurrency} | "
@@ -901,7 +1191,7 @@ async def async_main() -> None:
         f"环境配置 | "
         f"dataset={args.dataset} | "
         f"model={args.model} | "
-        f"policy=camel_yunwu_llm"
+        f"policy=camel_bailian_qwen_llm"
     )
 
     started_at = time.perf_counter()
@@ -911,6 +1201,7 @@ async def async_main() -> None:
     next_count = 0
     stop_count = 0
     failed_count = 0
+    termination_by_agent: dict[str, dict[str, Any]] = {}
 
     with events_path.open(
         "w",
@@ -920,11 +1211,31 @@ async def async_main() -> None:
 
         for simulation_step in range(
             1,
-            args.track + 1,
+            effective_max_steps + 1,
         ):
             step_started_at = (
                 time.perf_counter()
             )
+
+            # 仿真时长是第二重安全上限。
+            for state in states:
+                if state.stopped:
+                    continue
+                elapsed_simulation_minutes = (
+                    state.simulation_minute
+                    - state.session_start_minute
+                )
+                if elapsed_simulation_minutes >= args.max_session_minutes:
+                    state.stopped = True
+                    termination_by_agent[state.agent_id] = {
+                        "type": "safety_limit_censored",
+                        "reason": "max_session_minutes",
+                        "limit": args.max_session_minutes,
+                        "observed_steps": state.step,
+                        "observed_simulation_minutes": (
+                            elapsed_simulation_minutes
+                        ),
+                    }
 
             active_states = [
                 state
@@ -1036,6 +1347,36 @@ async def async_main() -> None:
                                     "simulation_step"
                                 ]
                             ),
+                            "simulation_minute_before": (
+                                event[
+                                    "simulation_minute_before"
+                                ]
+                            ),
+                            "simulation_minute_after": (
+                                event[
+                                    "simulation_minute_after"
+                                ]
+                            ),
+                            "simulation_time_before": (
+                                event[
+                                    "simulation_time_before"
+                                ]
+                            ),
+                            "simulation_time_after": (
+                                event[
+                                    "simulation_time_after"
+                                ]
+                            ),
+                            "current_hour": (
+                                event[
+                                    "current_hour"
+                                ]
+                            ),
+                            "activity_evaluation": (
+                                event[
+                                    "activity_evaluation"
+                                ]
+                            ),
                             "visible_cards": (
                                 event[
                                     "visible_cards"
@@ -1061,6 +1402,16 @@ async def async_main() -> None:
                                     "dynamic_profile_after"
                                 ]
                             ),
+                            "intended_to_stop": (
+                                event[
+                                    "intended_to_stop"
+                                ]
+                            ),
+                            "intention_reason": (
+                                event[
+                                    "intention_reason"
+                                ]
+                            ),
                             "action": (
                                 event[
                                     "action"
@@ -1075,6 +1426,27 @@ async def async_main() -> None:
                                 event[
                                     "reason"
                                 ]
+                            ),
+                            "stop_failure": (
+                                event[
+                                    "stop_failure"
+                                ]
+                            ),
+                            "goal_evaluation": (
+                                event[
+                                    "goal_evaluation"
+                                ]
+                            ),
+                            "goal_conflict": (
+                                event[
+                                    "goal_conflict"
+                                ]
+                            ),
+                            "special_event": (
+                                event["special_event"]
+                            ),
+                            "external_interruption": (
+                                event["external_interruption"]
                             ),
                             "history_after": (
                                 event[
@@ -1103,6 +1475,15 @@ async def async_main() -> None:
 
                     if not event["success"]:
                         failed_count += 1
+                        termination_by_agent[state.agent_id] = {
+                            "type": "technical_failure_censored",
+                            "reason": event.get("error"),
+                            "observed_steps": state.step,
+                            "observed_simulation_minutes": (
+                                state.simulation_minute
+                                - state.session_start_minute
+                            ),
+                        }
 
                     if event["action"] == "click":
                         click_count += 1
@@ -1112,6 +1493,26 @@ async def async_main() -> None:
 
                     elif event["action"] == "stop":
                         stop_count += 1
+                        if event.get("external_interruption") is True:
+                            termination_by_agent[state.agent_id] = {
+                                "type": "external_interruption",
+                                "reason": event.get("reason"),
+                                "observed_steps": state.step,
+                                "observed_simulation_minutes": (
+                                    state.simulation_minute
+                                    - state.session_start_minute
+                                ),
+                            }
+                        elif event["success"]:
+                            termination_by_agent[state.agent_id] = {
+                                "type": "natural_stop",
+                                "reason": event.get("reason"),
+                                "observed_steps": state.step,
+                                "observed_simulation_minutes": (
+                                    state.simulation_minute
+                                    - state.session_start_minute
+                                ),
+                            }
 
                 # 把当前批事件立即写入硬盘。
                 event_file.flush()
@@ -1162,6 +1563,250 @@ async def async_main() -> None:
                 f"{step_elapsed:.2f}秒"
             )
 
+    # 运行完最大轮数仍未主动停止的Agent属于右截断，
+    # 不能被当成正常使用。
+    for state in states:
+        if state.agent_id in termination_by_agent:
+            continue
+        elapsed_simulation_minutes = (
+            state.simulation_minute
+            - state.session_start_minute
+        )
+        termination_by_agent[state.agent_id] = {
+            "type": "safety_limit_censored",
+            "reason": (
+                "max_session_minutes"
+                if elapsed_simulation_minutes >= args.max_session_minutes
+                else "max_steps"
+            ),
+            "limit": (
+                args.max_session_minutes
+                if elapsed_simulation_minutes >= args.max_session_minutes
+                else effective_max_steps
+            ),
+            "observed_steps": state.step,
+            "observed_simulation_minutes": (
+                elapsed_simulation_minutes
+            ),
+        }
+
+    # 汇总每个Agent在本次session中的风险证据。
+    session_summaries: dict[
+        str,
+        dict[str, Any],
+    ] = {}
+
+    for (
+        agent_id,
+        agent_memory,
+    ) in memory["agents"].items():
+        agent_steps = agent_memory.get(
+            "steps",
+            [],
+        )
+
+        termination = termination_by_agent.get(agent_id)
+        agent_memory["termination"] = termination
+
+        session_summary = summarize_session(
+            agent_steps,
+            termination=termination,
+        )
+
+        # 保存到该Agent自己的memory中。
+        agent_memory[
+            "session_summary"
+        ] = session_summary
+
+        # 同时保存一份用于总体summary。
+        session_summaries[
+            agent_id
+        ] = session_summary
+
+    single_session_warning_count = sum(
+        1
+        for session_summary
+        in session_summaries.values()
+        if session_summary.get(
+            "session_problematic"
+        ) is True
+    )
+
+    recommender_addiction_risk = (
+        summarize_recommender_addiction_risk(
+            session_summaries
+        )
+    )
+    addicted_agent_ids = list(
+        recommender_addiction_risk.get(
+            "addicted_agent_ids",
+            [],
+        )
+    )
+    addicted_agent_count = int(
+        recommender_addiction_risk.get(
+            "addicted_agent_count",
+            0,
+        )
+    )
+    externally_censored_agent_ids = [
+        agent_id
+        for agent_id, session_summary
+        in session_summaries.items()
+        if session_summary.get("status") == "externally_censored"
+    ]
+    safety_censored_agent_ids = [
+        agent_id
+        for agent_id, session_summary
+        in session_summaries.items()
+        if session_summary.get("status") == "safety_limit_censored"
+    ]
+    technical_censored_agent_ids = [
+        agent_id
+        for agent_id, session_summary
+        in session_summaries.items()
+        if session_summary.get("status") == "technical_failure_censored"
+    ]
+    natural_stop_agent_ids = [
+        agent_id
+        for agent_id, termination
+        in termination_by_agent.items()
+        if termination.get("type") == "natural_stop"
+    ]
+    special_event_summary = {
+        **special_event_summary,
+        "externally_censored_agent_count": len(
+            externally_censored_agent_ids
+        ),
+        "externally_censored_agent_ids": (
+            externally_censored_agent_ids
+        ),
+    }
+
+    addiction_report = {
+        "schema_version": 1,
+        "report_type": "recommendation_system_addiction_risk",
+        "run_id": run_id,
+        "recommendation_system": {
+            "dataset": args.dataset,
+            "model": args.model,
+            "policy": "camel_bailian_qwen_llm",
+            "session_start_sampling": (
+                "profile_activity_weighted_random"
+            ),
+            "session_time_seed": session_time_seed,
+            "special_event": special_event_summary,
+            "execution_mode": execution_mode,
+            "safety_limits": {
+                "requested_track": args.track,
+                "max_auto_steps": args.max_auto_steps,
+                "effective_max_steps": effective_max_steps,
+                "max_session_minutes": args.max_session_minutes,
+            },
+        },
+        "judgement_scope": "single_session_operational_definition",
+        "operational_definition": (
+            "同一会话中存在活动异常，并且至少有一轮同时出现"
+            "Agent想停止却继续和继续行为影响高优先级生活目标"
+        ),
+        "clinical_diagnosis": False,
+        "probability_condition": (
+            special_event_summary["selected_event_id"]
+        ),
+        "special_event": special_event_summary,
+        "agent_count": args.count,
+        "termination_summary": {
+            "natural_stop_count": len(natural_stop_agent_ids),
+            "safety_limit_censored_count": len(
+                safety_censored_agent_ids
+            ),
+            "external_interruption_count": len(
+                externally_censored_agent_ids
+            ),
+            "technical_failure_censored_count": len(
+                technical_censored_agent_ids
+            ),
+        },
+        "recommendation_system_addiction_risk": (
+            recommender_addiction_risk
+        ),
+        "addicted_agent_count": addicted_agent_count,
+        "addicted_agent_ids": addicted_agent_ids,
+        "agents": {
+            agent_id: session_summary
+            for agent_id, session_summary
+            in session_summaries.items()
+        },
+    }
+    addiction_report_path.write_text(
+        json.dumps(
+            addiction_report,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    realism_evaluation: dict[str, Any] = {
+        "status": "not_requested"
+    }
+    if realism_baseline_path is not None:
+        realism_report_path = (
+            run_directory / "realism_report.json"
+        )
+        scheduler_log(
+            "开始执行KuaiSAR离线行为真实性评估"
+        )
+        try:
+            realism_report = evaluate_events_file(
+                events_path=events_path,
+                baseline_path=(
+                    realism_baseline_path
+                ),
+                output_path=realism_report_path,
+            )
+            realism_evaluation = {
+                "status": "ok",
+                "baseline_file": str(
+                    realism_baseline_path
+                ),
+                "report_file": str(
+                    realism_report_path
+                ),
+                "aggregate": realism_report.get(
+                    "aggregate",
+                    {},
+                ),
+            }
+            scheduler_log(
+                "KuaiSAR离线真实性评估完成 | "
+                "平均得分="
+                f"{realism_evaluation['aggregate'].get('mean_behavioral_realism_score')}"
+            )
+        except Exception as exc:
+            realism_evaluation = {
+                "status": "error",
+                "baseline_file": str(
+                    realism_baseline_path
+                ),
+                "report_file": str(
+                    realism_report_path
+                ),
+                "error": str(exc),
+            }
+            realism_report_path.write_text(
+                json.dumps(
+                    realism_evaluation,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            scheduler_log(
+                "KuaiSAR离线真实性评估失败 | "
+                f"{exc}"
+            )
+
     elapsed_seconds = (
         time.perf_counter()
         - started_at
@@ -1185,6 +1830,17 @@ async def async_main() -> None:
             else None
         ),
         "sample_seed": args.sample_seed,
+        "session_time_seed": session_time_seed,
+        "session_start_sampling": (
+            "profile_activity_weighted_random"
+        ),
+        "session_start_times": {
+            state.agent_id: format_simulation_time(
+                state.session_start_minute
+            )
+            for state in states
+        },
+        "special_event": special_event_summary,
         "selected_profile_indices": (
             selected_profile_indices
         ),
@@ -1194,7 +1850,11 @@ async def async_main() -> None:
         "agent_count": args.count,
         "dataset": args.dataset,
         "model": args.model,
+        "execution_mode": execution_mode,
         "track": args.track,
+        "max_auto_steps": args.max_auto_steps,
+        "effective_max_steps": effective_max_steps,
+        "max_session_minutes": args.max_session_minutes,
         "batch_size": args.batch_size,
         "max_api_concurrency": (
             args.max_concurrency
@@ -1202,12 +1862,43 @@ async def async_main() -> None:
         "max_retries": (
             args.max_retries
         ),
-        "policy": "camel_yunwu_llm",
+        "policy": "camel_bailian_qwen_llm",
         "event_count": event_count,
         "click_count": click_count,
         "next_count": next_count,
         "stop_count": stop_count,
         "failed_count": failed_count,
+        "single_session_warning_count": (
+            single_session_warning_count
+        ),
+        "addicted_agent_count": addicted_agent_count,
+        "addicted_agent_ids": addicted_agent_ids,
+        "addiction_report_file": str(addiction_report_path),
+        "recommendation_system_addiction_risk": (
+            recommender_addiction_risk
+        ),
+        "termination_summary": {
+            "natural_stop_count": len(natural_stop_agent_ids),
+            "natural_stop_agent_ids": natural_stop_agent_ids,
+            "safety_limit_censored_count": len(
+                safety_censored_agent_ids
+            ),
+            "safety_limit_censored_agent_ids": (
+                safety_censored_agent_ids
+            ),
+            "external_interruption_count": len(
+                externally_censored_agent_ids
+            ),
+            "technical_failure_censored_count": len(
+                technical_censored_agent_ids
+            ),
+        },
+        "session_summaries": (
+            session_summaries
+        ),
+        "realism_evaluation": (
+            realism_evaluation
+        ),
         "elapsed_seconds": round(
             elapsed_seconds,
             3,
@@ -1261,18 +1952,122 @@ async def async_main() -> None:
         f"总耗时={elapsed_seconds:.2f}秒"
     )
 
+    probability_for_log = recommender_addiction_risk.get(
+        "estimated_probability_percent"
+    )
+    scheduler_log(
+        "推荐系统沉迷风险估计完成 | "
+        "概率="
+        + (
+            f"{probability_for_log}%"
+            if probability_for_log is not None
+            else "数据不足"
+        )
+        + " | "
+        f"判定数量={addicted_agent_count}/"
+        f"{recommender_addiction_risk.get('evaluated_agent_count')} | "
+        "Agent="
+        + (
+            ", ".join(addicted_agent_ids)
+            if addicted_agent_ids
+            else "无"
+        )
+    )
+
     scheduler_log(
         f"结果目录：{run_directory}"
     )
 
     print("\n" + "=" * 65)
-    print("CAMEL+云雾AI大规模Agent实验完成")
+    print("CAMEL+阿里云百炼大规模Agent实验完成")
     print(f"Agent数量：{args.count}")
     print(f"AI决策事件数：{event_count}")
     print(f"点击次数：{click_count}")
     print(f"翻页次数：{next_count}")
     print(f"停止次数：{stop_count}")
     print(f"失败次数：{failed_count}")
+    print(
+        "本次特殊事件："
+        f"{special_event_summary['selected_event_name']}"
+    )
+    print(
+        "外部事件截断Agent数量："
+        f"{len(externally_censored_agent_ids)}"
+    )
+    print(f"自然停止Agent数量：{len(natural_stop_agent_ids)}")
+    print(
+        "安全上限截断Agent数量："
+        f"{len(safety_censored_agent_ids)}"
+    )
+    print(
+        "技术失败截断Agent数量："
+        f"{len(technical_censored_agent_ids)}"
+    )
+    probability_percent = recommender_addiction_risk.get(
+        "estimated_probability_percent"
+    )
+    confidence_interval = recommender_addiction_risk.get(
+        "confidence_interval_95"
+    )
+    if probability_percent is None:
+        print("推荐系统沉迷风险概率：数据不足")
+    else:
+        print(
+            "推荐系统沉迷风险概率："
+            f"{probability_percent:.3f}% "
+            f"({addicted_agent_count}/"
+            f"{recommender_addiction_risk['evaluated_agent_count']})"
+        )
+        if isinstance(confidence_interval, dict):
+            print(
+                "95%置信区间："
+                f"{confidence_interval['lower_percent']:.3f}%～"
+                f"{confidence_interval['upper_percent']:.3f}%"
+            )
+        evidence_by_goal = recommender_addiction_risk.get(
+            "addiction_evidence_by_goal",
+            {},
+        )
+        if isinstance(evidence_by_goal, dict):
+            print(
+                "沉迷风险涉及的目标："
+                + (
+                    ", ".join(
+                        f"{name}={count}次"
+                        for name, count
+                        in evidence_by_goal.items()
+                    )
+                    if evidence_by_goal
+                    else "无"
+                )
+            )
+    risk_bounds = recommender_addiction_risk.get(
+        "risk_probability_bounds",
+        {},
+    )
+    if (
+        isinstance(risk_bounds, dict)
+        and risk_bounds.get("lower_percent") is not None
+        and risk_bounds.get("upper_percent") is not None
+    ):
+        print(
+            "考虑安全截断后的风险范围："
+            f"{risk_bounds['lower_percent']:.3f}%～"
+            f"{risk_bounds['upper_percent']:.3f}%"
+        )
+    print(
+        "作为系统风险证据的沉迷Agent数量："
+        f"{addicted_agent_count}"
+    )
+    print(
+        "作为系统风险证据的沉迷Agent："
+        + (
+            ", ".join(addicted_agent_ids)
+            if addicted_agent_ids
+            else "无"
+        )
+    )
+    print(f"推荐系统沉迷风险报告：{addiction_report_path}")
     print(f"总耗时：{elapsed_seconds:.2f}秒")
     print(
         f"处理速度："
