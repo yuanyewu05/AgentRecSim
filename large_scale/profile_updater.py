@@ -444,8 +444,8 @@ def update_dynamic_profile(
 
         interests[label] = round(
             clamp(
-                current_value * 0.98
-                + base_value * 0.02
+                current_value * 0.95
+                + 1.00 * 0.05
             ),
             4,
         )
@@ -498,7 +498,7 @@ def update_dynamic_profile(
                     ),
                     0.50,
                 )
-                + 0.08
+                + 0.03
             ),
             4,
         )
@@ -509,7 +509,7 @@ def update_dynamic_profile(
                     dynamic.get("boredom"),
                     0.00,
                 )
-                - 0.08
+                - 0.03
             ),
             4,
         )
@@ -522,7 +522,7 @@ def update_dynamic_profile(
                     ),
                     0.50,
                 )
-                + 0.03
+                - 0.02
             ),
             4,
         )
@@ -734,7 +734,7 @@ def update_dynamic_profile(
                     ),
                     0.50,
                 )
-                - 0.04
+                - 0.05
             ),
             4,
         )
@@ -745,7 +745,7 @@ def update_dynamic_profile(
                     dynamic.get("boredom"),
                     0.00,
                 )
-                + 0.08
+                + 0.10
             ),
             4,
         )
@@ -758,7 +758,7 @@ def update_dynamic_profile(
                     ),
                     0.50,
                 )
-                - 0.05
+                - 0.06
             ),
             4,
         )
